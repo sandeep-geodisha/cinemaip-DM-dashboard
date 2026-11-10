@@ -209,12 +209,31 @@ function noneBackend(): Backend {
   };
 }
 
+/**
+ * Finds Upstash REST credentials. Vercel names them KV_REST_API_URL/TOKEN, or
+ * <PREFIX>_KV_REST_API_URL/TOKEN when a custom prefix was chosen while
+ * connecting the store; Upstash itself uses UPSTASH_REDIS_REST_URL/TOKEN.
+ * The read-only token is never used, since the board needs to write.
+ */
+function redisCredentials(): { url: string; token: string } | null {
+  const env = process.env;
+  const preferred: [string, string][] = [
+    ["KV_REST_API_URL", "KV_REST_API_TOKEN"],
+    ["UPSTASH_REDIS_REST_URL", "UPSTASH_REDIS_REST_TOKEN"],
+  ];
+  const prefixed = Object.keys(env)
+    .filter((k) => /(?:KV_REST_API|REDIS_REST)_URL$/.test(k))
+    .sort()
+    .map((k): [string, string] => [k, k.replace(/_URL$/, "_TOKEN")]);
+  for (const [u, t] of [...preferred, ...prefixed]) if (env[u] && env[t]) return { url: env[u]!, token: env[t]! };
+  return null;
+}
+
 let backendCache: Backend | null = null;
 function backend(): Backend {
   if (backendCache) return backendCache;
-  const url = process.env.KV_REST_API_URL ?? process.env.UPSTASH_REDIS_REST_URL;
-  const token = process.env.KV_REST_API_TOKEN ?? process.env.UPSTASH_REDIS_REST_TOKEN;
-  backendCache = url && token ? redisBackend(url, token) : process.env.VERCEL ? noneBackend() : fileBackend();
+  const creds = redisCredentials();
+  backendCache = creds ? redisBackend(creds.url, creds.token) : process.env.VERCEL ? noneBackend() : fileBackend();
   return backendCache;
 }
 
