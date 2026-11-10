@@ -109,12 +109,6 @@ export default function Home() {
                 </span>
               </h1>
 
-              <p className="fade-in mt-8 max-w-[52ch] text-lg leading-relaxed text-pretty text-muted" style={{ ["--d" as string]: "700ms" }}>
-                Twelve initiatives across four pillars to get CinemaIP{" "}
-                <span className="text-fg">found, seen and talked about</span>. ₹{lakh(b.totalK)}L in cash over six
-                months, and <span className="text-fg">{b.onResultPct}%</span> of it paid only when a result arrives.
-              </p>
-
               <div className="fade-in mt-10 flex flex-wrap gap-3" style={{ ["--d" as string]: "850ms" }}>
                 <a
                   href="#budget"

@@ -90,7 +90,7 @@ export const initiatives: Initiative[] = [
 ];
 
 export const goals: Goal[] = [
-  { goal: "Registered users", target: 25000, label: "25K", detail: "About ₹6 of cash per user" },
+  { goal: "Registered users", target: 50000, label: "50K", detail: "About ₹3 of cash per user" },
   { goal: "Reviews", target: 20000, label: "20K", detail: "From critics, ambassadors and contest leaderboards" },
   { goal: "Activated critics", target: 50, label: "50", detail: "Activated at 50 approved reviews; capped at 50" },
   { goal: "Organic share of sign-ups", target: 80, label: "80%+", detail: "Search, AI answers, referrals and channel links" },
