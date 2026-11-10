@@ -1,22 +1,29 @@
-// Server-only store for the task board: one readable JSON file.
+// Server-only store for the task board: one readable JSON document.
 //
-// - Every change is saved immediately, one write at a time (a process-wide
-//   lock), and lands atomically (temp file + rename) so the file is never
-//   half-written.
-// - Before writes, a timestamped copy goes to data/backups/ (at most one every
-//   few minutes, plus before upgrades and imports). Old automatic copies are
-//   pruned; files you put there yourself are never touched.
-// - The file can be edited by hand. On read it is checked and tidied (missing
-//   ids, unknown owners, missing plan tasks). If it isn't valid JSON, the page
-//   keeps showing the last good copy and edits pause until it's fixed, so a
-//   typo is never overwritten.
-// - Files from the first version of the board are upgraded in place, after a
-//   backup.
-// Set TASKS_FILE to move the file; the default is data/tasks.json.
+// Where it lives:
+// - Locally (and on any normal server): a JSON file, data/tasks.json by
+//   default (set TASKS_FILE to move it).
+// - On Vercel: Upstash Redis, which Vercel's Storage tab connects for you
+//   (it sets KV_REST_API_URL / KV_REST_API_TOKEN, or UPSTASH_REDIS_REST_*).
+//   Vercel has no permanent disk, so a file can't be used there.
+//
+// Safety, in both cases:
+// - Saves are compare-and-swap: a change is only written if nobody else saved
+//   in between; otherwise it is re-applied to the latest board and retried.
+//   Simultaneous edits never overwrite each other.
+// - Before writes, a copy is kept (at most one every few minutes, plus before
+//   upgrades, imports and deletions): data/backups/ for the file, a capped
+//   list in Redis otherwise. Files you put in data/backups/ are never touched.
+// - On read the board is checked and tidied (missing ids, unknown owners,
+//   missing plan tasks). If the file isn't valid JSON, the page keeps showing
+//   the last good copy and edits pause, so a hand-edit typo is never
+//   overwritten.
+// - Files from the first version of the board are upgraded, after a backup.
 
 import { randomUUID } from "node:crypto";
-import { copyFile, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
+import { Redis } from "@upstash/redis";
 import { PILLARS, type Pillar } from "@/lib/plan";
 import {
   ACTIVITY_CAP,
@@ -40,12 +47,10 @@ import {
   type Task,
 } from "@/lib/tasks";
 
-const FILE = process.env.TASKS_FILE ?? path.join(/*turbopackIgnore: true*/ process.cwd(), "data", "tasks.json");
-const BACKUP_DIR = path.join(/*turbopackIgnore: true*/ path.dirname(FILE), "backups");
-const AUTO_PREFIX = "auto-";
-const KEEP_AUTO_BACKUPS = 60;
+const KEEP_BACKUPS = 60;
 const BACKUP_EVERY_MS = 5 * 60 * 1000;
 const RESPONSE_ACTIVITY = 150;
+const MAX_ATTEMPTS = 8;
 
 export class HttpError extends Error {
   constructor(
@@ -65,6 +70,7 @@ const g = globalThis as typeof globalThis & {
   __cinemaipLastBackup?: number;
 };
 
+/** Orders work within one process (the file backend relies on it; Redis uses compare-and-swap). */
 function withLock<T>(fn: () => Promise<T>): Promise<T> {
   const run = (g.__cinemaipTaskLock ?? Promise.resolve()).then(fn);
   g.__cinemaipTaskLock = run.catch(() => {});
@@ -73,59 +79,154 @@ function withLock<T>(fn: () => Promise<T>): Promise<T> {
 
 const now = () => new Date().toISOString();
 const newId = (prefix: string) => `${prefix}${randomUUID().slice(0, 8)}`;
+const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /* ------------------------------------------------------------------ */
-/* File I/O                                                            */
+/* Storage backends                                                    */
 /* ------------------------------------------------------------------ */
 
-async function fileEtag(): Promise<string> {
-  try {
-    const s = await stat(/*turbopackIgnore: true*/ FILE);
-    return `${Math.round(s.mtimeMs)}-${s.size}`;
-  } catch {
-    return "none";
-  }
+type Snapshot = { text: string | null; etag: string };
+
+interface Backend {
+  name: "file" | "redis" | "none";
+  /** Where the board lives, for messages. */
+  where: string;
+  /** How often pages should check for changes. */
+  pollMs: number;
+  read(): Promise<Snapshot>;
+  etag(): Promise<string>;
+  /** Writes only if the stored etag still equals `expected`. Returns the new etag, or null if someone saved first. */
+  write(text: string, expected: string): Promise<string | null>;
+  backup(text: string, reason: string, force: boolean): Promise<void>;
 }
 
-async function readRaw(): Promise<unknown | null> {
-  let text: string;
-  try {
-    text = await readFile(/*turbopackIgnore: true*/ FILE, "utf8");
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
-    throw new FileError(`Can't read ${path.basename(FILE)}: ${(e as Error).message}`);
-  }
-  if (!text.trim()) return null;
+function fileBackend(): Backend {
+  const FILE = process.env.TASKS_FILE ?? path.join(/*turbopackIgnore: true*/ process.cwd(), "data", "tasks.json");
+  const DIR = path.join(/*turbopackIgnore: true*/ path.dirname(FILE), "backups");
+  const PREFIX = "auto-";
+  const etag = async () => {
+    try {
+      const s = await stat(/*turbopackIgnore: true*/ FILE);
+      return `${Math.round(s.mtimeMs)}-${s.size}`;
+    } catch {
+      return "none";
+    }
+  };
+  return {
+    name: "file",
+    where: path.relative(/*turbopackIgnore: true*/ process.cwd(), FILE) || FILE,
+    pollMs: 4000,
+    etag,
+    async read() {
+      const tag = await etag();
+      if (tag === "none") return { text: null, etag: tag };
+      try {
+        return { text: await readFile(/*turbopackIgnore: true*/ FILE, "utf8"), etag: tag };
+      } catch (e) {
+        if ((e as NodeJS.ErrnoException).code === "ENOENT") return { text: null, etag: "none" };
+        throw new FileError(`Can't read ${path.basename(FILE)}: ${(e as Error).message}`);
+      }
+    },
+    async write(text, expected) {
+      // Callers hold the process lock, so only a hand edit can slip in between; check for it.
+      if ((await etag()) !== expected) return null;
+      await mkdir(/*turbopackIgnore: true*/ path.dirname(FILE), { recursive: true });
+      const tmp = `${FILE}.${process.pid}.${Date.now()}.tmp`;
+      await writeFile(/*turbopackIgnore: true*/ tmp, text);
+      await rename(/*turbopackIgnore: true*/ tmp, /*turbopackIgnore: true*/ FILE);
+      return etag();
+    },
+    async backup(text, reason, force) {
+      const t = Date.now();
+      if (!force && g.__cinemaipLastBackup && t - g.__cinemaipLastBackup < BACKUP_EVERY_MS) return;
+      await mkdir(/*turbopackIgnore: true*/ DIR, { recursive: true });
+      const stamp = new Date(t).toISOString().replace(/[:.]/g, "-");
+      await writeFile(/*turbopackIgnore: true*/ path.join(DIR, `${PREFIX}${stamp}-${reason}.json`), text);
+      g.__cinemaipLastBackup = t;
+      const autos = (await readdir(/*turbopackIgnore: true*/ DIR)).filter((f) => f.startsWith(PREFIX) && f.endsWith(".json")).sort();
+      for (const f of autos.slice(0, Math.max(0, autos.length - KEEP_BACKUPS)))
+        await unlink(/*turbopackIgnore: true*/ path.join(DIR, f)).catch(() => {});
+    },
+  };
+}
+
+// Atomically: write only if the etag is unchanged. KEYS = [board, etag]; ARGV = [text, expected, next].
+const CAS_SCRIPT = `
+local cur = redis.call('GET', KEYS[2])
+if (cur == false and ARGV[2] == 'none') or cur == ARGV[2] then
+  redis.call('SET', KEYS[1], ARGV[1])
+  redis.call('SET', KEYS[2], ARGV[3])
+  return 1
+end
+return 0`;
+
+function redisBackend(url: string, token: string): Backend {
+  const redis = new Redis({ url, token, automaticDeserialization: false });
+  const KEY = process.env.TASKS_REDIS_KEY ?? "cinemaip:board";
+  const ETAG = `${KEY}:etag`;
+  const BACKUPS = `${KEY}:backups`;
+  return {
+    name: "redis",
+    where: "Upstash Redis",
+    pollMs: 10000,
+    async etag() {
+      return (await redis.get<string>(ETAG)) ?? "none";
+    },
+    async read() {
+      const [text, tag] = await redis.mget<[string | null, string | null]>(KEY, ETAG);
+      return { text: text ?? null, etag: tag ?? "none" };
+    },
+    async write(text, expected) {
+      const next = randomUUID();
+      const ok = await redis.eval<[string, string, string], number>(CAS_SCRIPT, [KEY, ETAG], [text, expected, next]);
+      return Number(ok) === 1 ? next : null;
+    },
+    async backup(text, reason, force) {
+      // One automatic copy per few minutes across all servers.
+      if (!force && !(await redis.set(`${BACKUPS}:recent`, "1", { nx: true, px: BACKUP_EVERY_MS }))) return;
+      const p = redis.pipeline();
+      p.lpush(BACKUPS, JSON.stringify({ at: now(), reason, board: text }));
+      p.ltrim(BACKUPS, 0, KEEP_BACKUPS - 1);
+      await p.exec();
+    },
+  };
+}
+
+const NOT_CONFIGURED =
+  "This site is on Vercel, which can't save files, and no database is connected yet. In Vercel, open the project → Storage → Create → Upstash for Redis → connect it to this project, then redeploy.";
+
+function noneBackend(): Backend {
+  return {
+    name: "none",
+    where: "nowhere (storage not set up)",
+    pollMs: 60000,
+    etag: async () => "none",
+    read: async () => ({ text: null, etag: "none" }),
+    write: async () => {
+      throw new HttpError(503, NOT_CONFIGURED);
+    },
+    backup: async () => {},
+  };
+}
+
+let backendCache: Backend | null = null;
+function backend(): Backend {
+  if (backendCache) return backendCache;
+  const url = process.env.KV_REST_API_URL ?? process.env.UPSTASH_REDIS_REST_URL;
+  const token = process.env.KV_REST_API_TOKEN ?? process.env.UPSTASH_REDIS_REST_TOKEN;
+  backendCache = url && token ? redisBackend(url, token) : process.env.VERCEL ? noneBackend() : fileBackend();
+  return backendCache;
+}
+
+const serialise = (b: BoardFile) => JSON.stringify(b, null, 2) + "\n";
+
+function parse(text: string | null): unknown {
+  if (text === null || !text.trim()) return null;
   try {
     return JSON.parse(text);
   } catch (e) {
-    throw new FileError(`${path.basename(FILE)} isn't valid JSON (${(e as Error).message}).`);
+    throw new FileError(`The board data isn't valid JSON (${(e as Error).message}).`);
   }
-}
-
-async function writeAtomic(board: BoardFile) {
-  await mkdir(/*turbopackIgnore: true*/ path.dirname(FILE), { recursive: true });
-  const tmp = `${FILE}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(/*turbopackIgnore: true*/ tmp, JSON.stringify(board, null, 2) + "\n");
-  await rename(/*turbopackIgnore: true*/ tmp, /*turbopackIgnore: true*/ FILE);
-}
-
-/** Copies the current file into backups/ (throttled unless forced) and prunes old automatic copies. */
-async function backup(reason: string, force = false) {
-  const t = Date.now();
-  if (!force && g.__cinemaipLastBackup && t - g.__cinemaipLastBackup < BACKUP_EVERY_MS) return;
-  try {
-    await stat(/*turbopackIgnore: true*/ FILE);
-  } catch {
-    return; // nothing to back up yet
-  }
-  await mkdir(/*turbopackIgnore: true*/ BACKUP_DIR, { recursive: true });
-  const stamp = new Date(t).toISOString().replace(/[:.]/g, "-");
-  await copyFile(/*turbopackIgnore: true*/ FILE, /*turbopackIgnore: true*/ path.join(BACKUP_DIR, `${AUTO_PREFIX}${stamp}-${reason}.json`));
-  g.__cinemaipLastBackup = t;
-  const autos = (await readdir(/*turbopackIgnore: true*/ BACKUP_DIR)).filter((f) => f.startsWith(AUTO_PREFIX) && f.endsWith(".json")).sort();
-  for (const f of autos.slice(0, Math.max(0, autos.length - KEEP_AUTO_BACKUPS)))
-    await unlink(/*turbopackIgnore: true*/ path.join(BACKUP_DIR, f)).catch(() => {});
 }
 
 /* ------------------------------------------------------------------ */
@@ -297,83 +398,110 @@ function normalise(raw: unknown): BoardFile {
 /* Load / save                                                         */
 /* ------------------------------------------------------------------ */
 
-/** Reads and tidies the file. If tidying changed anything (upgrade, new ids...), saves it. Call inside the lock. */
-async function load(): Promise<{ board: BoardFile; fileError?: string }> {
+type Loaded = { board: BoardFile; etag: string; fileError?: string };
+
+const strip = (b: unknown) => JSON.stringify({ ...(b as Obj), rev: 0, updatedAt: 0 });
+
+/** Reads and tidies the board. If tidying changed anything (upgrade, new ids...), saves it. */
+async function load(): Promise<Loaded> {
+  const be = backend();
+  const snap = await be.read();
   let raw: unknown;
+  let board: BoardFile;
   try {
-    raw = await readRaw();
+    raw = parse(snap.text);
+    board = normalise(raw);
   } catch (e) {
     if (e instanceof FileError) {
-      if (g.__cinemaipLastGood) return { board: g.__cinemaipLastGood, fileError: e.message };
-      throw new HttpError(500, `${e.message} Fix the file, or restore a copy from data/backups.`);
+      const msg = be.name === "file" ? `${be.where}: ${e.message}` : e.message;
+      if (g.__cinemaipLastGood) return { board: g.__cinemaipLastGood, etag: snap.etag, fileError: msg };
+      throw new HttpError(500, `${msg} Fix it, or restore a backup.`);
     }
     throw e;
   }
-  let board: BoardFile;
-  try {
-    board = normalise(raw);
-  } catch (e) {
-    if (e instanceof FileError && g.__cinemaipLastGood) return { board: g.__cinemaipLastGood, fileError: e.message };
-    throw e;
-  }
-  const strip = (b: unknown) => JSON.stringify({ ...(b as Obj), rev: 0, updatedAt: 0 });
+  if (be.name === "none") return { board, etag: snap.etag, fileError: NOT_CONFIGURED };
+
+  let etag = snap.etag;
   if (raw === null || strip(raw) !== strip(board)) {
     const upgrading = isObj(raw) && raw.version !== 2;
-    await backup(upgrading ? "before-upgrade" : "before-tidy", true);
+    if (snap.text) await be.backup(snap.text, upgrading ? "before-upgrade" : "before-tidy", true);
     board.rev += 1;
     board.updatedAt = now();
-    await writeAtomic(board);
+    // If someone saved meanwhile, skip; the next read tidies their version.
+    etag = (await be.write(serialise(board), snap.etag)) ?? etag;
   }
   g.__cinemaipLastGood = board;
-  return { board };
+  return { board, etag };
 }
 
-async function respond(board: BoardFile, fileError?: string): Promise<BoardResponse> {
-  return { ...board, activity: board.activity.slice(0, RESPONSE_ACTIVITY), etag: await fileEtag(), ...(fileError && { fileError }) };
+function respond(board: BoardFile, etag: string, fileError?: string): BoardResponse {
+  return {
+    ...board,
+    activity: board.activity.slice(0, RESPONSE_ACTIVITY),
+    etag,
+    storage: backend().name,
+    pollMs: backend().pollMs,
+    ...(fileError && { fileError }),
+  };
 }
 
 /** The board for GET. Returns null when the caller's etag is still current. */
 export async function readBoard(etag?: string | null): Promise<BoardResponse | null> {
-  if (etag && etag === (await fileEtag()) && g.__cinemaipLastGood) return null;
+  if (etag && etag !== "none" && etag === (await backend().etag())) return null;
   return withLock(async () => {
-    const { board, fileError } = await load();
-    return respond(board, fileError);
+    const { board, etag: tag, fileError } = await load();
+    return respond(board, tag, fileError);
   });
 }
 
-/** The whole file, for download. */
+/** The whole board, for download. */
 export async function exportBoard(): Promise<BoardFile> {
   return withLock(async () => (await load()).board);
 }
 
 type Ctx = { by: string; log: (subject: string, action: string, taskId?: string | null) => void };
 
-/** Loads, applies `fn`, records activity, backs up and saves, one change at a time. */
+/**
+ * Loads the latest board, applies `fn`, records activity and saves with
+ * compare-and-swap. If someone else saved first, it starts again from their
+ * version, so no change is lost. `fn` must be safe to run more than once.
+ */
 function mutate(actorId: string | null, fn: (d: BoardFile, ctx: Ctx) => void, opts: { forceBackup?: string } = {}) {
   return withLock(async () => {
-    const { board, fileError } = await load();
-    if (fileError)
-      throw new HttpError(409, `${fileError} Changes are paused so your file isn't overwritten. Fix it, or restore a copy from data/backups.`);
-    const d: BoardFile = structuredClone(board);
-    const by = d.team.find((m) => m.id === actorId)?.name ?? "Someone";
-    const entries: ActivityEntry[] = [];
-    const ts = now();
-    fn(d, { by, log: (subject, action, taskId = null) => entries.push({ id: newId("a_"), at: ts, by, taskId, subject, action }) });
+    const be = backend();
+    for (let attempt = 0; attempt < MAX_ATTEMPTS; attempt++) {
+      const { board, etag, fileError } = await load();
+      if (fileError)
+        throw new HttpError(
+          be.name === "none" ? 503 : 409,
+          be.name === "none" ? fileError : `${fileError} Changes are paused so nothing is overwritten. Fix it, or restore a backup.`,
+        );
+      const d: BoardFile = structuredClone(board);
+      const by = d.team.find((m) => m.id === actorId)?.name ?? "Someone";
+      const entries: ActivityEntry[] = [];
+      const ts = now();
+      fn(d, { by, log: (subject, action, taskId = null) => entries.push({ id: newId("a_"), at: ts, by, taskId, subject, action }) });
 
-    const byId = new Map(d.team.map((m) => [m.id, m]));
-    for (const t of d.tasks) {
-      const m = t.assigneeId ? byId.get(t.assigneeId) : undefined;
-      t.assigneeId = m ? m.id : null;
-      t.assignee = m ? m.name : null;
+      const byId = new Map(d.team.map((m) => [m.id, m]));
+      for (const t of d.tasks) {
+        const m = t.assigneeId ? byId.get(t.assigneeId) : undefined;
+        t.assigneeId = m ? m.id : null;
+        t.assignee = m ? m.name : null;
+      }
+      d.activity = [...entries.reverse(), ...d.activity].slice(0, ACTIVITY_CAP);
+      d.rev += 1;
+      d.updatedAt = ts;
+
+      await be.backup(serialise(board), opts.forceBackup ?? "auto", !!opts.forceBackup);
+      const next = await be.write(serialise(d), etag);
+      if (next) {
+        g.__cinemaipLastGood = d;
+        return respond(d, next);
+      }
+      // Someone saved first: back off briefly and re-apply on top of their version.
+      await sleep(25 * 2 ** attempt + Math.random() * 40);
     }
-    d.activity = [...entries.reverse(), ...d.activity].slice(0, ACTIVITY_CAP);
-    d.rev += 1;
-    d.updatedAt = ts;
-
-    await backup(opts.forceBackup ?? "auto", !!opts.forceBackup);
-    await writeAtomic(d);
-    g.__cinemaipLastGood = d;
-    return respond(d);
+    throw new HttpError(409, "The board is very busy right now and that change couldn't be saved. Please try again.");
   });
 }
 
@@ -639,6 +767,7 @@ export async function importMembers(body: unknown, actorId: string | null) {
     actorId,
     (d, ctx) => {
       const ts = now();
+      Object.assign(result, { added: 0, updated: 0, skipped: [] });
       for (const [i, raw] of list.entries()) {
         const label = isObj(raw) && typeof raw.name === "string" ? raw.name : `entry ${i + 1}`;
         if (!isObj(raw)) {

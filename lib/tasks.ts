@@ -108,9 +108,19 @@ export type BoardFile = {
 export type BoardResponse = BoardFile & {
   /** Changes whenever the file changes, including hand edits. */
   etag: string;
-  /** Set when the file on disk can't be read; the board shows the last good copy and edits pause. */
+  /** Where the board is stored. */
+  storage: "file" | "redis" | "none";
+  /** How often the page should check for changes. */
+  pollMs: number;
+  /** Set when the board can't be read or saved; the page shows the last good copy and edits pause. */
   fileError?: string;
 };
+
+/** True for a board in the current format (guards against stale pages and odd responses). */
+export function isBoardResponse(v: unknown): v is BoardResponse {
+  const b = v as BoardResponse | null;
+  return !!b && b.version === 2 && Array.isArray(b.team) && Array.isArray(b.tasks) && Array.isArray(b.activity);
+}
 
 export const LIMITS = { name: 60, role: 60, email: 120, title: 160, summary: 300, description: 6000, notes: 4000 };
 export const ACTIVITY_CAP = 500;

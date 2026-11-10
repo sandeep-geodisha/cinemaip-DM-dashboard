@@ -11,7 +11,7 @@ import {
   useSyncExternalStore,
   type ReactNode,
 } from "react";
-import { planTextById, type ActivityEntry, type BoardResponse, type Member, type Task } from "@/lib/tasks";
+import { isBoardResponse, planTextById, type ActivityEntry, type BoardResponse, type Member, type Task } from "@/lib/tasks";
 import { TaskEditor } from "@/components/tasks/editor";
 
 export type Patch = Partial<Pick<Task, "assigneeId" | "status" | "priority" | "due" | "notes" | "title" | "summary" | "description">> & {
@@ -24,8 +24,9 @@ export type ImportResult = { added: number; updated: number; skipped: { entry: s
 
 type Ctx = {
   loaded: boolean;
-  /** Set when data/tasks.json can't be read; edits are paused. */
+  /** Set when the board can't be read or saved; edits are paused. */
   fileError: string | null;
+  storage: BoardResponse["storage"] | null;
   /** Tasks on the board. */
   tasks: Task[];
   byId: Map<string, Task>;
@@ -62,7 +63,8 @@ export function useTasks() {
   return c;
 }
 
-const POLL_MS = 4000;
+const IDLE_AFTER_MS = 10 * 60 * 1000;
+const IDLE_POLL_MS = 60 * 1000;
 
 /* "Who am I" is remembered per browser. */
 const ACTOR_KEY = "cinemaip-actor";
@@ -117,10 +119,19 @@ export function TasksProvider({ children }: { children: ReactNode }) {
     return () => window.clearTimeout(t);
   }, [toast]);
 
-  const accept = useCallback((b: BoardResponse) => {
+  const accept = useCallback((b: unknown) => {
+    if (!isBoardResponse(b)) {
+      // Not a board in the current format (e.g. an error page). Keep what we have.
+      console.warn("Ignoring unexpected board response", b);
+      return false;
+    }
     etag.current = b.etag;
     setData(b);
+    return true;
   }, []);
+
+  // A page left open across an upgrade can hold data in an older format. Reload it from the server.
+  const stale = !!data && !isBoardResponse(data);
 
   const call = useCallback(
     async (url: string, init?: RequestInit): Promise<(BoardResponse & { result?: ImportResult }) | null> => {
@@ -136,7 +147,11 @@ export function TasksProvider({ children }: { children: ReactNode }) {
           notify(json.error ?? `Request failed (${res.status})`, "error");
           return null;
         }
-        accept(json as BoardResponse);
+        if (!accept(json)) {
+          notify("The board sent something unexpected. Reloading it…", "error");
+          etag.current = null;
+          return null;
+        }
         return json;
       } catch {
         notify("Couldn't reach the server. That change wasn't saved.", "error");
@@ -155,25 +170,51 @@ export function TasksProvider({ children }: { children: ReactNode }) {
         const q = !force && etag.current ? `?etag=${encodeURIComponent(etag.current)}` : "";
         const res = await fetch(`/api/tasks${q}`, { cache: "no-store" });
         if (res.status === 204 || pending.current > 0) return;
-        if (res.ok) accept(await res.json());
+        if (res.ok) accept(await res.json().catch(() => null));
       } catch {}
     },
     [accept],
   );
 
-  // Initial load, polling, and refresh when the tab regains focus.
+  useEffect(() => {
+    if (stale) {
+      etag.current = null;
+      refresh(true);
+    }
+  }, [stale, refresh]);
+
+  // Initial load, then polling while the tab is visible: at the server's pace,
+  // slowing down after 10 minutes without any activity. Refresh on focus too.
+  const pollMs = data?.pollMs ?? 4000;
   useEffect(() => {
     refresh(true);
-    const iv = window.setInterval(() => document.visibilityState === "visible" && refresh(), POLL_MS);
-    const onVis = () => document.visibilityState === "visible" && refresh();
+  }, [refresh]);
+  useEffect(() => {
+    let lastActive = Date.now();
+    let timer = 0;
+    const markActive = () => {
+      const wasIdle = Date.now() - lastActive > IDLE_AFTER_MS;
+      lastActive = Date.now();
+      if (wasIdle) refresh();
+    };
+    const tick = () => {
+      if (document.visibilityState === "visible") refresh();
+      const idle = Date.now() - lastActive > IDLE_AFTER_MS;
+      timer = window.setTimeout(tick, idle ? Math.max(pollMs, IDLE_POLL_MS) : pollMs);
+    };
+    timer = window.setTimeout(tick, pollMs);
+    const onVis = () => document.visibilityState === "visible" && (markActive(), refresh());
+    const events = ["pointerdown", "keydown", "scroll"] as const;
+    events.forEach((e) => window.addEventListener(e, markActive, { passive: true }));
     document.addEventListener("visibilitychange", onVis);
     window.addEventListener("focus", onVis);
     return () => {
-      window.clearInterval(iv);
+      window.clearTimeout(timer);
+      events.forEach((e) => window.removeEventListener(e, markActive));
       document.removeEventListener("visibilitychange", onVis);
       window.removeEventListener("focus", onVis);
     };
-  }, [refresh]);
+  }, [refresh, pollMs]);
 
   const patchLocal = useCallback((id: string, fn: (t: Task) => Task) => {
     setData((d) => d && { ...d, tasks: d.tasks.map((t) => (t.id === id ? fn(t) : t)) });
@@ -225,21 +266,23 @@ export function TasksProvider({ children }: { children: ReactNode }) {
   );
 
   const value = useMemo<Ctx>(() => {
-    const all = data?.tasks ?? [];
+    const ok = !!data && isBoardResponse(data);
+    const all = ok ? data.tasks : [];
     const tasks = all.filter((t) => !t.removed);
     const removedTasks = all.filter((t) => t.removed).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
-    const members = data?.team ?? [];
+    const members = ok ? data.team : [];
     const memberById = new Map(members.map((m) => [m.id, m]));
     return {
-      loaded: !!data,
-      fileError: data?.fileError ?? null,
+      loaded: ok,
+      fileError: ok ? (data.fileError ?? null) : null,
+      storage: ok ? data.storage : null,
       tasks,
       byId: new Map(tasks.map((t) => [t.id, t])),
       removedTasks,
       removedIds: new Set(removedTasks.map((t) => t.id)),
       members,
       memberById,
-      activity: data?.activity ?? [],
+      activity: ok ? data.activity : [],
       actor: (actorId && memberById.get(actorId)) || null,
       setActor: writeActor,
       update,

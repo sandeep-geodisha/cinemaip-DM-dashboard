@@ -3,6 +3,7 @@ import { CountUp, Effects } from "@/components/effects";
 import { Nav } from "@/components/nav";
 import { SectionHead } from "@/components/section-head";
 import { TaskBoard } from "@/components/tasks/board";
+import { BoardBoundary } from "@/components/tasks/boundary";
 import { TasksProvider } from "@/components/tasks/provider";
 import { LiveStatus, OwnerChip } from "@/components/tasks/ui";
 import { decisionTaskId } from "@/lib/tasks";
@@ -249,7 +250,9 @@ export default function Home() {
             </div>
           </section>
 
-          <TaskBoard />
+          <BoardBoundary>
+            <TaskBoard />
+          </BoardBoundary>
 
           <ActsSection />
 

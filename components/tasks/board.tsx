@@ -37,7 +37,7 @@ function sortTasks(tasks: Task[]) {
 }
 
 export function TaskBoard() {
-  const { loaded, tasks, members, openNew, removedTasks, fileError, activity } = useTasks();
+  const { loaded, tasks, members, openNew, removedTasks, fileError, activity, storage } = useTasks();
   const [showRemoved, setShowRemoved] = useState(false);
   const [showActivity, setShowActivity] = useState(false);
   const [kind, setKind] = useState<Kind | "">("");
@@ -67,15 +67,23 @@ export function TaskBoard() {
             Who is doing <em className="gold-text not-italic">what</em>, and by when
           </>
         }
-        lede="Every decision, calendar activity and initiative is a task with a full brief. Give each one an owner, a due date and a status. Every change is saved to the board file straight away, so the whole team sees the same board."
+        lede="Every decision, calendar activity and initiative is a task with a full brief. Give each one an owner, a due date and a status. Every change is saved straight away, so the whole team sees the same board."
       />
 
       {fileError && (
         <div role="alert" className="mt-10 rounded-2xl border border-st-blocked/50 bg-st-blocked/[0.08] px-5 py-4 text-sm">
-          <p className="font-medium text-st-blocked">The board file can&apos;t be read, so changes are paused</p>
+          <p className="font-medium text-st-blocked">
+            {storage === "none" ? "Saving isn't set up on this site yet" : "The board can't be read, so changes are paused"}
+          </p>
           <p className="mt-1 text-muted">
-            {fileError} You&apos;re seeing the last saved version. Fix <code className="font-mono">data/tasks.json</code>, or copy a good version
-            back from <code className="font-mono">data/backups/</code>; the board picks it up within a few seconds.
+            {fileError}
+            {storage === "file" && (
+              <>
+                {" "}
+                You&apos;re seeing the last saved version. Fix <code className="font-mono">data/tasks.json</code>, or copy a good version back from{" "}
+                <code className="font-mono">data/backups/</code>; the board picks it up within a few seconds.
+              </>
+            )}
           </p>
         </div>
       )}

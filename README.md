@@ -15,7 +15,24 @@ Everyone uses the same running app, so they all see and edit the same board. Cha
 
 ## Where the board is saved
 
-Everything on the task board is saved straight away to **`data/tasks.json`**. That includes the team, every task and a log of who changed what. Set `TASKS_FILE=/path/to/file.json` to keep it somewhere else.
+Everything on the task board is saved straight away: the team, every task and a log of who changed what. Where it goes depends on where the app runs:
+
+| Running on | Board is stored in |
+|---|---|
+| Your computer or any normal server (`npm run dev` / `npm start`) | **`data/tasks.json`** (set `TASKS_FILE` to move it) |
+| Vercel | **Upstash Redis**, because Vercel has no permanent disk |
+
+### Setting up Vercel (one time)
+
+1. In Vercel, open the project → **Storage** → **Create** → **Upstash for Redis** (the free plan is enough) → connect it to this project. This adds `KV_REST_API_URL` and `KV_REST_API_TOKEN` (or `UPSTASH_REDIS_REST_URL` / `_TOKEN`) for you.
+2. **Redeploy** (Deployments → ⋯ → Redeploy, or push to `main`).
+3. Open the site → Team panel → **Import JSON**, and pick your local `data/tasks.json` (or a team list like `examples/team.json`) to add the team.
+
+Until storage is connected, the Vercel site shows the plan tasks read-only, with a "Saving isn't set up on this site yet" message.
+
+On Redis, saves are compare-and-swap, so people editing at the same moment never overwrite each other. The last 60 backups are kept in the `cinemaip:board:backups` list, and **Export** downloads the board as a `.json` file. Set `TASKS_REDIS_KEY` to use a different key.
+
+### The local file
 
 - **Keep this file safe.** `data/` is git-ignored because it holds team names and emails. Back it up, and don't delete it.
 - **Automatic backups.** Before saves (at most one every 5 minutes), and always before an upgrade, import, permanent delete or member removal, a copy goes to `data/backups/auto-*.json`. The newest 60 are kept. Files you put in `data/backups/` yourself are never touched.
