@@ -1,0 +1,5 @@
+[
+  { "name": "First Last", "role": "Growth lead", "email": "first@example.com" },
+  { "name": "Another Person", "role": "Content" },
+  { "name": "Third Person", "role": "Partnerships", "email": "third@example.com" }
+]

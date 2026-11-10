@@ -9,13 +9,16 @@ import {
   PRIORITY_LABEL,
   STATUSES,
   STATUS_LABEL,
+  formatDate,
+  isEdited,
   isOverdue,
+  planTextById,
   type Priority,
   type Status,
   type Task,
 } from "@/lib/tasks";
-import { useTasks } from "@/components/tasks/provider";
-import { Avatar, StatusIcon, formatDue, statusColor } from "@/components/tasks/ui";
+import { useTasks, type Patch } from "@/components/tasks/provider";
+import { Avatar, DescriptionView, StatusIcon, statusColor } from "@/components/tasks/ui";
 
 type Editing = { mode: "edit"; id: string } | { mode: "new" } | null;
 
@@ -261,42 +264,90 @@ function DrawerHeader({ kicker, children, onClose }: { kicker: ReactNode; childr
 
 /* ---------------- edit ---------------- */
 
+/** Keeps a local draft of a text field, following remote changes unless the user is mid-edit. */
+function useDraft(remote: string) {
+  const [value, setValue] = useState(remote);
+  const [dirty, setDirty] = useState(false);
+  const [seen, setSeen] = useState(remote);
+  if (remote !== seen) {
+    // Someone else (or a hand edit) changed it: follow along unless we have unsaved typing.
+    setSeen(remote);
+    if (!dirty) setValue(remote);
+  }
+  return {
+    value,
+    dirty,
+    set: (v: string) => {
+      setValue(v);
+      setDirty(v !== remote);
+    },
+    reset: (v = remote) => {
+      setValue(v);
+      setDirty(false);
+    },
+  };
+}
+
+function timeAgo(iso: string) {
+  const s = Math.round((Date.now() - Date.parse(iso)) / 1000);
+  if (s < 45) return "just now";
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return new Date(iso).toLocaleDateString("en-IN", { day: "numeric", month: "short", year: "numeric" });
+}
+
 function EditTask({ task, onClose }: { task: Task; onClose: () => void }) {
-  const { update, remove, notify, memberById } = useTasks();
-  const [notes, setNotes] = useState(task.notes);
-  const [title, setTitle] = useState(task.title);
-  const [detail, setDetail] = useState(task.detail);
-  const custom = task.kind === "custom";
+  const { update, remove, notify, memberById, activity, actor } = useTasks();
+  const plan = planTextById().get(task.id);
+  const custom = task.type === "custom";
+  const title = useDraft(task.title);
+  const summary = useDraft(task.summary);
+  const notes = useDraft(task.notes);
+  const [editingDesc, setEditingDesc] = useState(false);
+  const desc = useDraft(task.description);
+  const history = activity.filter((a) => a.taskId === task.id).slice(0, 25);
 
-  const saveTitle = () => {
-    const t = title.trim();
-    if (t === task.title) return;
-    if (!t) {
-      // Custom tasks need a title; plan tasks fall back to the plan's wording.
-      if (custom) return setTitle(task.title);
-      setTitle(task.planTitle);
-      if (task.title !== task.planTitle) set({ title: "" }, "Title reset to the plan");
-      return;
-    }
-    set({ title: t }, "Title updated");
-  };
-
-  const saveDetail = () => {
-    const v = detail.trim();
-    if (v === task.detail) return;
-    if (!v && !custom) setDetail(task.planDetail);
-    set({ detail: v }, "Details updated");
-  };
-
-  const resetWording = () => {
-    setTitle(task.planTitle);
-    setDetail(task.planDetail);
-    set({ title: "", detail: "" }, "Reset to the plan's wording");
-  };
-
-  const set = async (patch: Parameters<typeof update>[1], msg?: string) => {
+  const set = async (patch: Patch, msg?: string) => {
     const ok = await update(task.id, patch);
     if (ok && msg) notify(msg);
+    return ok;
+  };
+
+  const saveTitle = async () => {
+    const t = title.value.trim();
+    if (t === task.title) return title.reset();
+    if (!t && custom) {
+      notify("A task needs a title", "error");
+      return title.reset();
+    }
+    if (await set({ title: t }, t ? "Title saved" : "Title reset to the plan")) title.reset(t || plan?.title);
+  };
+
+  const saveSummary = async () => {
+    const v = summary.value.trim();
+    if (v === task.summary) return summary.reset();
+    if (await set({ summary: v }, "Summary saved")) summary.reset(v || plan?.summary || "");
+  };
+
+  const saveNotes = async () => {
+    if (notes.value.trim() === task.notes) return notes.reset();
+    if (await set({ notes: notes.value }, "Notes saved")) notes.reset(notes.value.trim());
+  };
+
+  const saveDesc = async () => {
+    const v = desc.value.trim();
+    if (v !== task.description && !(await set({ description: v }, "Description saved"))) return;
+    desc.reset(v || plan?.description || "");
+    setEditingDesc(false);
+  };
+
+  const resetWording = async () => {
+    if (await set({ title: "", summary: "", description: "" }, "Reset to the plan's wording")) {
+      title.reset(plan?.title);
+      summary.reset(plan?.summary);
+      desc.reset(plan?.description);
+      setEditingDesc(false);
+    }
   };
 
   const assign = (id: string | null) => {
@@ -310,9 +361,9 @@ function EditTask({ task, onClose }: { task: Task; onClose: () => void }) {
         onClose={onClose}
         kicker={
           <>
-            <span className="rounded-full border border-gold/40 px-2 py-0.5 text-gold-ink">{KIND_LABEL[task.kind]}</span>
+            <span className="rounded-full border border-gold/40 px-2 py-0.5 text-gold-ink">{KIND_LABEL[task.type]}</span>
             {task.pillar && (
-              <span className="inline-flex items-center gap-1.5 normal-case tracking-normal">
+              <span className="inline-flex items-center gap-1.5 tracking-normal normal-case">
                 <span className="size-2 rounded-full" style={{ background: pillarColor(task.pillar) }} />
                 {task.pillar}
               </span>
@@ -323,28 +374,20 @@ function EditTask({ task, onClose }: { task: Task; onClose: () => void }) {
         <label className="group/title relative mt-3 block">
           <span className="sr-only">Title</span>
           <input
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
+            value={title.value}
+            onChange={(e) => title.set(e.target.value)}
             onBlur={saveTitle}
             onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
             maxLength={LIMITS.title}
             className="-mx-2 w-[calc(100%+1rem)] rounded-lg bg-transparent px-2 py-1 pr-8 font-display text-2xl leading-snug transition hover:bg-panel focus:bg-panel focus:ring-2 focus:ring-gold/30 focus:outline-none"
           />
-          <svg
-            viewBox="0 0 16 16"
-            aria-hidden
-            className="pointer-events-none absolute top-1/2 right-0 size-3.5 -translate-y-1/2 text-faint opacity-0 transition group-hover/title:opacity-100"
-            fill="none"
-            stroke="currentColor"
-            strokeWidth="1.6"
-            strokeLinejoin="round"
-          >
-            <path d="M10.8 2.7l2.5 2.5L5.6 12.9 2.5 13.5l.6-3.1z" />
-          </svg>
+          <span className="pointer-events-none absolute top-1/2 right-0 -translate-y-1/2 text-faint opacity-0 transition group-hover/title:opacity-100">
+            <PencilIcon />
+          </span>
         </label>
         <p className="mt-1 flex flex-wrap items-center gap-x-2 text-sm text-muted">
           {task.context}
-          {task.edited && (
+          {isEdited(task) && (
             <>
               <span className="text-faint">·</span>
               <span className="text-gold-ink">Edited from the plan</span>
@@ -357,16 +400,78 @@ function EditTask({ task, onClose }: { task: Task; onClose: () => void }) {
       </DrawerHeader>
 
       <div className="flex flex-1 flex-col gap-7 px-6 py-6">
-        <Field label="Details">
-          <textarea
-            value={detail}
-            onChange={(e) => setDetail(e.target.value)}
-            onBlur={saveDetail}
-            rows={3}
-            maxLength={LIMITS.detail}
+        <Field label="Summary" hint={summary.dirty ? <span className="text-xs text-faint">Saves when you click away</span> : undefined}>
+          <input
+            value={summary.value}
+            onChange={(e) => summary.set(e.target.value)}
+            onBlur={saveSummary}
+            onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
+            maxLength={LIMITS.summary}
+            placeholder={plan?.summary || "One line shown on the task card"}
             className={inputCls}
-            placeholder={custom ? "What needs doing" : task.planDetail}
           />
+        </Field>
+
+        <Field
+          label="Description"
+          hint={
+            !editingDesc && (
+              <button
+                type="button"
+                onClick={() => {
+                  desc.reset();
+                  setEditingDesc(true);
+                }}
+                className="inline-flex items-center gap-1 text-xs text-muted transition hover:text-gold-ink"
+              >
+                <PencilIcon className="size-3" /> Edit
+              </button>
+            )
+          }
+        >
+          {editingDesc ? (
+            <div className="flex flex-col gap-2">
+              <textarea
+                autoFocus
+                value={desc.value}
+                onChange={(e) => desc.set(e.target.value)}
+                rows={12}
+                maxLength={LIMITS.description}
+                className={`${inputCls} font-mono text-[13px] leading-relaxed`}
+                placeholder={"Context: why this matters\nSteps:\n- First step\n- Second step\nDone when: what finished looks like"}
+              />
+              <div className="flex items-center justify-between gap-2">
+                <span className="text-[11px] text-faint">Tip: start a line with “Label:” for a heading, or “- ” for a bullet.</span>
+                <span className="flex gap-2">
+                  <button
+                    type="button"
+                    onClick={() => {
+                      desc.reset();
+                      setEditingDesc(false);
+                    }}
+                    className="rounded-full px-3 py-1.5 text-sm text-muted hover:text-fg"
+                  >
+                    Cancel
+                  </button>
+                  <button type="button" onClick={saveDesc} className="rounded-full bg-gold px-4 py-1.5 text-sm font-medium text-black transition hover:bg-gold-2">
+                    Save
+                  </button>
+                </span>
+              </div>
+            </div>
+          ) : task.description ? (
+            <div className="rounded-xl border border-line bg-panel px-4 py-3.5">
+              <DescriptionView text={task.description} />
+            </div>
+          ) : (
+            <button
+              type="button"
+              onClick={() => setEditingDesc(true)}
+              className="rounded-xl border border-dashed border-line-2 px-4 py-5 text-left text-sm text-muted transition hover:border-gold/60 hover:text-fg"
+            >
+              + Add a detailed description: context, steps, and what “done” looks like
+            </button>
+          )}
         </Field>
 
         <Field label="Owner">
@@ -385,15 +490,9 @@ function EditTask({ task, onClose }: { task: Task; onClose: () => void }) {
 
         <div className="grid gap-7">
           <Field label="Priority">
-            <Segmented
-              label="Priority"
-              value={task.priority}
-              options={PRIORITIES}
-              onChange={(p) => set({ priority: p })}
-              render={(p) => PRIORITY_LABEL[p]}
-            />
+            <Segmented label="Priority" value={task.priority} options={PRIORITIES} onChange={(p) => set({ priority: p })} render={(p) => PRIORITY_LABEL[p]} />
           </Field>
-          <Field label="Due date" hint={task.due && <span className="text-xs text-faint">{formatDue(task.due)}</span>}>
+          <Field label="Due date" hint={task.due && <span className="text-xs text-faint">{formatDate(task.due)}</span>}>
             <DueInput value={task.due} status={task.status} onChange={(due) => set({ due })} />
           </Field>
         </div>
@@ -404,25 +503,41 @@ function EditTask({ task, onClose }: { task: Task; onClose: () => void }) {
           </Field>
         )}
 
-        <Field
-          label="Notes"
-          hint={notes !== task.notes ? <span className="text-xs text-faint">Saves when you click away</span> : undefined}
-        >
+        <Field label="Notes" hint={notes.dirty ? <span className="text-xs text-faint">Saves when you click away</span> : undefined}>
           <textarea
-            value={notes}
-            onChange={(e) => setNotes(e.target.value)}
-            onBlur={() => notes !== task.notes && set({ notes }, "Notes saved")}
+            value={notes.value}
+            onChange={(e) => notes.set(e.target.value)}
+            onBlur={saveNotes}
             rows={4}
             maxLength={LIMITS.notes}
-            placeholder={task.kind === "decision" ? "Record the decision taken, or what's needed to make it" : "Progress, links, blockers"}
+            placeholder={task.type === "decision" ? "Record the decision taken, or what's needed to make it" : "Progress, links, blockers"}
             className={inputCls}
           />
         </Field>
+
+        <Field label="History">
+          {history.length ? (
+            <ol className="relative flex flex-col gap-3 border-l border-line pl-4">
+              {history.map((h) => (
+                <li key={h.id} className="relative text-sm">
+                  <span className="absolute top-1.5 -left-[21px] size-2 rounded-full bg-gold/70 ring-4 ring-bg" />
+                  <span className="text-fg">{h.by}</span> <span className="text-muted">{h.action}</span>
+                  <span className="block text-[11px] text-faint" title={new Date(h.at).toLocaleString("en-IN")}>
+                    {timeAgo(h.at)}
+                  </span>
+                </li>
+              ))}
+            </ol>
+          ) : (
+            <p className="text-sm text-faint">No changes yet.</p>
+          )}
+        </Field>
       </div>
 
-      <div className="sticky bottom-0 flex items-center justify-between gap-3 border-t border-line bg-bg/90 px-6 py-4 backdrop-blur-xl">
+      <div className="sticky bottom-0 flex flex-wrap items-center justify-between gap-3 border-t border-line bg-bg/90 px-6 py-4 backdrop-blur-xl">
         <span className="text-xs text-faint">
-          {task.updatedAt ? `Updated ${new Date(task.updatedAt).toLocaleString("en-IN", { dateStyle: "medium", timeStyle: "short" })}` : "Not updated yet"}
+          {task.updatedBy ? `Updated ${timeAgo(task.updatedAt)} by ${task.updatedBy}` : `Added ${timeAgo(task.createdAt)}`}
+          {!actor && <span className="block text-gold-ink">Tip: pick who you are in the Team panel so changes show your name.</span>}
         </span>
         <div className="flex items-center gap-2">
           <button
@@ -480,7 +595,8 @@ function PillarSelect({ value, onChange }: { value: string | null; onChange: (p:
 function NewTaskForm({ onDone }: { onDone: () => void }) {
   const { create, notify } = useTasks();
   const [title, setTitle] = useState("");
-  const [detail, setDetail] = useState("");
+  const [summary, setSummary] = useState("");
+  const [description, setDescription] = useState("");
   const [pillar, setPillar] = useState<string | null>(null);
   const [assigneeId, setAssignee] = useState<string | null>(null);
   const [status, setStatus] = useState<Status>("todo");
@@ -491,7 +607,7 @@ function NewTaskForm({ onDone }: { onDone: () => void }) {
   const submit = async () => {
     if (!title.trim()) return;
     setBusy(true);
-    const ok = await create({ title, detail, pillar, assigneeId, status, priority, due });
+    const ok = await create({ title, summary, description, pillar, assigneeId, status, priority, due });
     setBusy(false);
     if (ok) {
       notify("Task created");
@@ -520,8 +636,18 @@ function NewTaskForm({ onDone }: { onDone: () => void }) {
         />
       </DrawerHeader>
       <div className="flex flex-1 flex-col gap-7 px-6 py-6">
-        <Field label="Details">
-          <textarea value={detail} onChange={(e) => setDetail(e.target.value)} rows={3} maxLength={LIMITS.detail} className={inputCls} placeholder="Context, links, definition of done" />
+        <Field label="Summary">
+          <input value={summary} onChange={(e) => setSummary(e.target.value)} maxLength={LIMITS.summary} className={inputCls} placeholder="One line shown on the task card" />
+        </Field>
+        <Field label="Description">
+          <textarea
+            value={description}
+            onChange={(e) => setDescription(e.target.value)}
+            rows={7}
+            maxLength={LIMITS.description}
+            className={`${inputCls} font-mono text-[13px] leading-relaxed`}
+            placeholder={"Context: why this matters\nSteps:\n- First step\n- Second step\nDone when: what finished looks like"}
+          />
         </Field>
         <Field label="Owner">
           <OwnerPicker value={assigneeId} onChange={setAssignee} />
@@ -556,4 +682,3 @@ function NewTaskForm({ onDone }: { onDone: () => void }) {
     </form>
   );
 }
-

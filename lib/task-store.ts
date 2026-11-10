@@ -1,24 +1,51 @@
-// Server-only JSON file store for tasks and team members.
-// Writes are serialised through one promise chain and land atomically
-// (temp file + rename), so concurrent requests can't interleave or corrupt it.
+// Server-only store for the task board: one readable JSON file.
+//
+// - Every change is saved immediately, one write at a time (a process-wide
+//   lock), and lands atomically (temp file + rename) so the file is never
+//   half-written.
+// - Before writes, a timestamped copy goes to data/backups/ (at most one every
+//   few minutes, plus before upgrades and imports). Old automatic copies are
+//   pruned; files you put there yourself are never touched.
+// - The file can be edited by hand. On read it is checked and tidied (missing
+//   ids, unknown owners, missing plan tasks). If it isn't valid JSON, the page
+//   keeps showing the last good copy and edits pause until it's fixed, so a
+//   typo is never overwritten.
+// - Files from the first version of the board are upgraded in place, after a
+//   backup.
 // Set TASKS_FILE to move the file; the default is data/tasks.json.
 
 import { randomUUID } from "node:crypto";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
+import { copyFile, mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { PILLARS, type Pillar } from "@/lib/plan";
 import {
+  ACTIVITY_CAP,
+  KINDS,
   LIMITS,
   PRIORITIES,
+  PRIORITY_LABEL,
   STATUSES,
+  STATUS_LABEL,
+  formatDate,
   isPlanTaskId,
-  type BoardData,
+  planCatalogue,
+  planTextById,
+  seedTask,
+  type ActivityEntry,
+  type BoardFile,
+  type BoardResponse,
+  type Member,
   type Priority,
   type Status,
-  type TaskState,
+  type Task,
 } from "@/lib/tasks";
 
 const FILE = process.env.TASKS_FILE ?? path.join(/*turbopackIgnore: true*/ process.cwd(), "data", "tasks.json");
+const BACKUP_DIR = path.join(/*turbopackIgnore: true*/ path.dirname(FILE), "backups");
+const AUTO_PREFIX = "auto-";
+const KEEP_AUTO_BACKUPS = 60;
+const BACKUP_EVERY_MS = 5 * 60 * 1000;
+const RESPONSE_ACTIVITY = 150;
 
 export class HttpError extends Error {
   constructor(
@@ -29,50 +56,338 @@ export class HttpError extends Error {
   }
 }
 
-const empty = (): BoardData => ({ members: [], tasks: {}, custom: [], removed: [] });
+class FileError extends Error {}
 
-export async function readBoard(): Promise<BoardData> {
-  try {
-    const raw = JSON.parse(await readFile(/*turbopackIgnore: true*/ FILE, "utf8"));
-    return { members: raw.members ?? [], tasks: raw.tasks ?? {}, custom: raw.custom ?? [], removed: raw.removed ?? [] };
-  } catch (e) {
-    if ((e as NodeJS.ErrnoException).code === "ENOENT") return empty();
-    throw e;
-  }
-}
+// Shared across every route bundle in this process.
+const g = globalThis as typeof globalThis & {
+  __cinemaipTaskLock?: Promise<unknown>;
+  __cinemaipLastGood?: BoardFile;
+  __cinemaipLastBackup?: number;
+};
 
-async function writeBoard(data: BoardData) {
-  await mkdir(/*turbopackIgnore: true*/ path.dirname(FILE), { recursive: true });
-  const tmp = `${FILE}.${process.pid}.${Date.now()}.tmp`;
-  await writeFile(/*turbopackIgnore: true*/ tmp, JSON.stringify(data, null, 2));
-  await rename(/*turbopackIgnore: true*/ tmp, /*turbopackIgnore: true*/ FILE);
-}
-
-// One lock per process, shared by every route. Each route can get its own copy
-// of this module, so a module-level variable would give each route its own lock.
-const g = globalThis as typeof globalThis & { __cinemaipTaskLock?: Promise<unknown> };
-
-/** Runs `fn` against the latest data and saves the result, one write at a time. */
-function mutate(fn: (d: BoardData) => void): Promise<BoardData> {
-  const run = (g.__cinemaipTaskLock ?? Promise.resolve()).then(async () => {
-    const d = await readBoard();
-    fn(d);
-    await writeBoard(d);
-    return d;
-  });
+function withLock<T>(fn: () => Promise<T>): Promise<T> {
+  const run = (g.__cinemaipTaskLock ?? Promise.resolve()).then(fn);
   g.__cinemaipTaskLock = run.catch(() => {});
   return run;
 }
 
-/* ---------- validation ---------- */
+const now = () => new Date().toISOString();
+const newId = (prefix: string) => `${prefix}${randomUUID().slice(0, 8)}`;
 
-const str = (v: unknown, field: string, max: number, required = false) => {
+/* ------------------------------------------------------------------ */
+/* File I/O                                                            */
+/* ------------------------------------------------------------------ */
+
+async function fileEtag(): Promise<string> {
+  try {
+    const s = await stat(/*turbopackIgnore: true*/ FILE);
+    return `${Math.round(s.mtimeMs)}-${s.size}`;
+  } catch {
+    return "none";
+  }
+}
+
+async function readRaw(): Promise<unknown | null> {
+  let text: string;
+  try {
+    text = await readFile(/*turbopackIgnore: true*/ FILE, "utf8");
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return null;
+    throw new FileError(`Can't read ${path.basename(FILE)}: ${(e as Error).message}`);
+  }
+  if (!text.trim()) return null;
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    throw new FileError(`${path.basename(FILE)} isn't valid JSON (${(e as Error).message}).`);
+  }
+}
+
+async function writeAtomic(board: BoardFile) {
+  await mkdir(/*turbopackIgnore: true*/ path.dirname(FILE), { recursive: true });
+  const tmp = `${FILE}.${process.pid}.${Date.now()}.tmp`;
+  await writeFile(/*turbopackIgnore: true*/ tmp, JSON.stringify(board, null, 2) + "\n");
+  await rename(/*turbopackIgnore: true*/ tmp, /*turbopackIgnore: true*/ FILE);
+}
+
+/** Copies the current file into backups/ (throttled unless forced) and prunes old automatic copies. */
+async function backup(reason: string, force = false) {
+  const t = Date.now();
+  if (!force && g.__cinemaipLastBackup && t - g.__cinemaipLastBackup < BACKUP_EVERY_MS) return;
+  try {
+    await stat(/*turbopackIgnore: true*/ FILE);
+  } catch {
+    return; // nothing to back up yet
+  }
+  await mkdir(/*turbopackIgnore: true*/ BACKUP_DIR, { recursive: true });
+  const stamp = new Date(t).toISOString().replace(/[:.]/g, "-");
+  await copyFile(/*turbopackIgnore: true*/ FILE, /*turbopackIgnore: true*/ path.join(BACKUP_DIR, `${AUTO_PREFIX}${stamp}-${reason}.json`));
+  g.__cinemaipLastBackup = t;
+  const autos = (await readdir(/*turbopackIgnore: true*/ BACKUP_DIR)).filter((f) => f.startsWith(AUTO_PREFIX) && f.endsWith(".json")).sort();
+  for (const f of autos.slice(0, Math.max(0, autos.length - KEEP_AUTO_BACKUPS)))
+    await unlink(/*turbopackIgnore: true*/ path.join(BACKUP_DIR, f)).catch(() => {});
+}
+
+/* ------------------------------------------------------------------ */
+/* Normalising (also upgrades version 1 files)                         */
+/* ------------------------------------------------------------------ */
+
+type Obj = Record<string, unknown>;
+const isObj = (v: unknown): v is Obj => !!v && typeof v === "object" && !Array.isArray(v);
+const text = (v: unknown, max: number) => (typeof v === "string" ? v.trim().slice(0, max) : "");
+const longText = (v: unknown, max: number) => (typeof v === "string" ? v.replace(/\r\n/g, "\n").trim().slice(0, max) : "");
+const isoOr = (v: unknown, fallback: string) => (typeof v === "string" && !Number.isNaN(Date.parse(v)) ? v : fallback);
+const dateOrNull = (v: unknown) => (typeof v === "string" && /^\d{4}-\d{2}-\d{2}$/.test(v) && !Number.isNaN(Date.parse(v)) ? v : null);
+const pick = <T extends string>(v: unknown, list: readonly T[], fallback: T): T => (list.includes(v as T) ? (v as T) : fallback);
+const pillarOrNull = (v: unknown): Pillar | null => (PILLARS.includes(v as Pillar) ? (v as Pillar) : null);
+
+function normaliseMember(v: unknown, ts: string): Member | null {
+  if (!isObj(v)) return null;
+  const name = text(v.name, LIMITS.name);
+  if (!name) return null;
+  return {
+    id: typeof v.id === "string" && v.id ? v.id : newId("m_"),
+    name,
+    role: text(v.role, LIMITS.role),
+    email: text(v.email, LIMITS.email),
+    addedAt: isoOr(v.addedAt, ts),
+    updatedAt: isoOr(v.updatedAt, ts),
+  };
+}
+
+function normaliseTask(v: Obj, ts: string): Task | null {
+  const id = typeof v.id === "string" ? v.id : "";
+  const plan = planTextById().get(id);
+  const type = plan ? plan.type : pick(v.type, KINDS, "custom");
+  if (!id || (type !== "custom" && !plan)) return null;
+  const title = text(v.title, LIMITS.title) || plan?.title || "";
+  if (!title) return null;
+  const pillar = plan ? plan.pillar : pillarOrNull(v.pillar);
+  return {
+    id,
+    type,
+    title,
+    summary: typeof v.summary === "string" ? text(v.summary, LIMITS.summary) : (plan?.summary ?? ""),
+    description: typeof v.description === "string" ? longText(v.description, LIMITS.description) : (plan?.description ?? ""),
+    context: plan ? plan.context : pillar ? `Custom · ${pillar}` : "Custom task",
+    pillar,
+    assigneeId: typeof v.assigneeId === "string" && v.assigneeId ? v.assigneeId : null,
+    assignee: null, // filled from the team below
+    status: pick(v.status, STATUSES, "todo"),
+    priority: pick(v.priority, PRIORITIES, type === "decision" ? "high" : "medium"),
+    due: dateOrNull(v.due),
+    notes: longText(v.notes, LIMITS.notes),
+    removed: v.removed === true,
+    createdAt: isoOr(v.createdAt, ts),
+    updatedAt: isoOr(v.updatedAt, ts),
+    updatedBy: typeof v.updatedBy === "string" && v.updatedBy ? v.updatedBy : null,
+  };
+}
+
+/** Turns a version 1 file (state keyed by id) into version 2 objects. */
+function upgradeV1(raw: Obj, ts: string): Obj {
+  const state = isObj(raw.tasks) ? raw.tasks : {};
+  const removed = new Set(Array.isArray(raw.removed) ? raw.removed : []);
+  const s = (id: string) => (isObj(state[id]) ? (state[id] as Obj) : {});
+  const tasks: Obj[] = planCatalogue().map((p) => {
+    const st = s(p.id);
+    return {
+      ...seedTask(p, ts),
+      ...st,
+      id: p.id,
+      title: typeof st.title === "string" && st.title ? st.title : p.title,
+      summary: typeof st.detail === "string" && st.detail ? st.detail : p.summary,
+      description: p.description,
+      removed: removed.has(p.id),
+      updatedAt: isoOr(st.updatedAt, ts),
+    };
+  });
+  for (const c of Array.isArray(raw.custom) ? raw.custom : []) {
+    if (!isObj(c) || typeof c.id !== "string") continue;
+    const st = s(c.id);
+    tasks.push({
+      ...st,
+      id: c.id,
+      type: "custom",
+      title: c.title,
+      summary: c.detail ?? "",
+      description: "",
+      pillar: c.pillar ?? null,
+      removed: removed.has(c.id),
+      createdAt: c.createdAt,
+      updatedAt: isoOr(st.updatedAt, ts),
+    });
+  }
+  return {
+    version: 2,
+    rev: 1,
+    updatedAt: ts,
+    team: Array.isArray(raw.members) ? raw.members : [],
+    tasks,
+    activity: [
+      { id: newId("a_"), at: ts, by: "System", taskId: null, subject: "Data file", action: "upgraded to version 2 (full task details stored)" },
+    ],
+  };
+}
+
+/** Checks and tidies anything read from disk. Idempotent: normalising its own output changes nothing. */
+function normalise(raw: unknown): BoardFile {
+  const ts = now();
+  let src: Obj;
+  if (raw === null) src = { version: 2, rev: 0, updatedAt: ts, team: [], tasks: [], activity: [] };
+  else if (!isObj(raw)) throw new FileError("The data file must contain a JSON object.");
+  else src = raw.version === 2 ? raw : upgradeV1(raw, ts);
+
+  // Team: valid, unique ids and names.
+  const team: Member[] = [];
+  const seenNames = new Set<string>();
+  const seenIds = new Set<string>();
+  for (const v of Array.isArray(src.team) ? src.team : []) {
+    const m = normaliseMember(v, ts);
+    if (!m || seenNames.has(m.name.toLowerCase())) continue;
+    if (seenIds.has(m.id)) m.id = newId("m_");
+    seenNames.add(m.name.toLowerCase());
+    seenIds.add(m.id);
+    team.push(m);
+  }
+
+  // Tasks: valid, unique, plus any plan task not yet in the file.
+  const tasks: Task[] = [];
+  const seenTasks = new Set<string>();
+  for (const v of Array.isArray(src.tasks) ? src.tasks : []) {
+    if (!isObj(v)) continue;
+    const t = normaliseTask(v, ts);
+    if (!t || seenTasks.has(t.id)) continue;
+    seenTasks.add(t.id);
+    tasks.push(t);
+  }
+  for (const p of planCatalogue()) if (!seenTasks.has(p.id)) tasks.push(seedTask(p, ts));
+
+  // Owners must exist; keep owner names in step with the team.
+  const byId = new Map(team.map((m) => [m.id, m]));
+  for (const t of tasks) {
+    const m = t.assigneeId ? byId.get(t.assigneeId) : undefined;
+    t.assigneeId = m ? m.id : null;
+    t.assignee = m ? m.name : null;
+  }
+
+  const activity: ActivityEntry[] = (Array.isArray(src.activity) ? src.activity : [])
+    .filter(isObj)
+    .map((a) => ({
+      id: typeof a.id === "string" ? a.id : newId("a_"),
+      at: isoOr(a.at, ts),
+      by: text(a.by, LIMITS.name) || "Someone",
+      taskId: typeof a.taskId === "string" ? a.taskId : null,
+      subject: text(a.subject, LIMITS.title),
+      action: text(a.action, 500),
+    }))
+    .slice(0, ACTIVITY_CAP);
+
+  return {
+    version: 2,
+    rev: typeof src.rev === "number" && src.rev >= 0 ? Math.floor(src.rev) : 0,
+    updatedAt: isoOr(src.updatedAt, ts),
+    team,
+    tasks,
+    activity,
+  };
+}
+
+/* ------------------------------------------------------------------ */
+/* Load / save                                                         */
+/* ------------------------------------------------------------------ */
+
+/** Reads and tidies the file. If tidying changed anything (upgrade, new ids...), saves it. Call inside the lock. */
+async function load(): Promise<{ board: BoardFile; fileError?: string }> {
+  let raw: unknown;
+  try {
+    raw = await readRaw();
+  } catch (e) {
+    if (e instanceof FileError) {
+      if (g.__cinemaipLastGood) return { board: g.__cinemaipLastGood, fileError: e.message };
+      throw new HttpError(500, `${e.message} Fix the file, or restore a copy from data/backups.`);
+    }
+    throw e;
+  }
+  let board: BoardFile;
+  try {
+    board = normalise(raw);
+  } catch (e) {
+    if (e instanceof FileError && g.__cinemaipLastGood) return { board: g.__cinemaipLastGood, fileError: e.message };
+    throw e;
+  }
+  const strip = (b: unknown) => JSON.stringify({ ...(b as Obj), rev: 0, updatedAt: 0 });
+  if (raw === null || strip(raw) !== strip(board)) {
+    const upgrading = isObj(raw) && raw.version !== 2;
+    await backup(upgrading ? "before-upgrade" : "before-tidy", true);
+    board.rev += 1;
+    board.updatedAt = now();
+    await writeAtomic(board);
+  }
+  g.__cinemaipLastGood = board;
+  return { board };
+}
+
+async function respond(board: BoardFile, fileError?: string): Promise<BoardResponse> {
+  return { ...board, activity: board.activity.slice(0, RESPONSE_ACTIVITY), etag: await fileEtag(), ...(fileError && { fileError }) };
+}
+
+/** The board for GET. Returns null when the caller's etag is still current. */
+export async function readBoard(etag?: string | null): Promise<BoardResponse | null> {
+  if (etag && etag === (await fileEtag()) && g.__cinemaipLastGood) return null;
+  return withLock(async () => {
+    const { board, fileError } = await load();
+    return respond(board, fileError);
+  });
+}
+
+/** The whole file, for download. */
+export async function exportBoard(): Promise<BoardFile> {
+  return withLock(async () => (await load()).board);
+}
+
+type Ctx = { by: string; log: (subject: string, action: string, taskId?: string | null) => void };
+
+/** Loads, applies `fn`, records activity, backs up and saves, one change at a time. */
+function mutate(actorId: string | null, fn: (d: BoardFile, ctx: Ctx) => void, opts: { forceBackup?: string } = {}) {
+  return withLock(async () => {
+    const { board, fileError } = await load();
+    if (fileError)
+      throw new HttpError(409, `${fileError} Changes are paused so your file isn't overwritten. Fix it, or restore a copy from data/backups.`);
+    const d: BoardFile = structuredClone(board);
+    const by = d.team.find((m) => m.id === actorId)?.name ?? "Someone";
+    const entries: ActivityEntry[] = [];
+    const ts = now();
+    fn(d, { by, log: (subject, action, taskId = null) => entries.push({ id: newId("a_"), at: ts, by, taskId, subject, action }) });
+
+    const byId = new Map(d.team.map((m) => [m.id, m]));
+    for (const t of d.tasks) {
+      const m = t.assigneeId ? byId.get(t.assigneeId) : undefined;
+      t.assigneeId = m ? m.id : null;
+      t.assignee = m ? m.name : null;
+    }
+    d.activity = [...entries.reverse(), ...d.activity].slice(0, ACTIVITY_CAP);
+    d.rev += 1;
+    d.updatedAt = ts;
+
+    await backup(opts.forceBackup ?? "auto", !!opts.forceBackup);
+    await writeAtomic(d);
+    g.__cinemaipLastGood = d;
+    return respond(d);
+  });
+}
+
+/* ------------------------------------------------------------------ */
+/* Validation                                                          */
+/* ------------------------------------------------------------------ */
+
+const str = (v: unknown, field: string, max: number, required = false, long = false) => {
   if (v === undefined || v === null) {
     if (required) throw new HttpError(400, `${field} is required`);
     return "";
   }
   if (typeof v !== "string") throw new HttpError(400, `${field} must be text`);
-  const s = v.trim();
+  const s = long ? v.replace(/\r\n/g, "\n").trim() : v.trim();
   if (required && !s) throw new HttpError(400, `${field} is required`);
   if (s.length > max) throw new HttpError(400, `${field} must be at most ${max} characters`);
   return s;
@@ -83,152 +398,317 @@ const oneOf = <T extends string>(v: unknown, list: readonly T[], field: string):
   return v as T;
 };
 
-const date = (v: unknown): string | null => {
+const dueDate = (v: unknown): string | null => {
   if (v === null || v === "") return null;
   if (typeof v !== "string" || !/^\d{4}-\d{2}-\d{2}$/.test(v) || Number.isNaN(Date.parse(v)))
     throw new HttpError(400, "due must be a YYYY-MM-DD date");
   return v;
 };
 
-const pillar = (v: unknown): Pillar | null => (v === null || v === undefined || v === "" ? null : oneOf(v, PILLARS, "pillar"));
+const pillarField = (v: unknown): Pillar | null => (v === null || v === undefined || v === "" ? null : oneOf(v, PILLARS, "pillar"));
 
-/** Picks and validates the TaskState fields present in `body`. */
-function statePatch(body: Record<string, unknown>, d: BoardData): Partial<TaskState> {
-  const out: Partial<TaskState> = {};
+const EMAIL = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const email = (v: unknown) => {
+  const e = str(v, "email", LIMITS.email);
+  if (e && !EMAIL.test(e)) throw new HttpError(400, `"${e}" doesn't look like an email address`);
+  return e;
+};
+
+const short = (s: string, n = 60) => (s.length > n ? s.slice(0, n - 1) + "…" : s);
+
+/* ------------------------------------------------------------------ */
+/* Task operations                                                     */
+/* ------------------------------------------------------------------ */
+
+function findTask(d: BoardFile, id: string) {
+  const t = d.tasks.find((x) => x.id === id);
+  if (!t) throw new HttpError(404, "Task not found");
+  return t;
+}
+
+/** Applies owner/status/priority/due/notes from `body` and returns readable change notes. */
+function applyState(d: BoardFile, t: Task, body: Obj): string[] {
+  const changes: string[] = [];
   if ("assigneeId" in body) {
     const a = body.assigneeId;
-    if (a !== null && !d.members.some((m) => m.id === a)) throw new HttpError(400, "Unknown assignee");
-    out.assigneeId = (a as string | null) ?? null;
-  }
-  if ("status" in body) out.status = oneOf<Status>(body.status, STATUSES, "status");
-  if ("priority" in body) out.priority = oneOf<Priority>(body.priority, PRIORITIES, "priority");
-  if ("due" in body) out.due = date(body.due);
-  if ("notes" in body) out.notes = str(body.notes, "notes", LIMITS.notes);
-  return out;
-}
-
-/* ---------- operations ---------- */
-
-export function updateTask(id: string, body: Record<string, unknown>) {
-  return mutate((d) => {
-    const custom = d.custom.find((c) => c.id === id);
-    if (!custom && !isPlanTaskId(id)) throw new HttpError(404, "Task not found");
-    const next = { ...d.tasks[id], ...statePatch(body, d), updatedAt: new Date().toISOString() };
-    if (custom) {
-      if ("title" in body) custom.title = str(body.title, "title", LIMITS.title, true);
-      if ("detail" in body) custom.detail = str(body.detail, "detail", LIMITS.detail);
-      if ("pillar" in body) custom.pillar = pillar(body.pillar);
-    } else {
-      // Plan tasks: an empty title or detail resets it to the plan's wording.
-      for (const k of ["title", "detail"] as const) {
-        if (!(k in body)) continue;
-        const v = str(body[k], k, k === "title" ? LIMITS.title : LIMITS.detail);
-        if (v) next[k] = v;
-        else delete next[k];
-      }
+    if (a !== null && !d.team.some((m) => m.id === a)) throw new HttpError(400, "That person isn't on the team any more");
+    const next = (a as string | null) ?? null;
+    if (next !== t.assigneeId) {
+      t.assigneeId = next;
+      changes.push(next ? `assigned to ${d.team.find((m) => m.id === next)!.name}` : "unassigned");
     }
-    d.tasks[id] = next;
+  }
+  if ("status" in body) {
+    const s = oneOf<Status>(body.status, STATUSES, "status");
+    if (s !== t.status) changes.push(`status ${STATUS_LABEL[t.status]} → ${STATUS_LABEL[s]}`);
+    t.status = s;
+  }
+  if ("priority" in body) {
+    const p = oneOf<Priority>(body.priority, PRIORITIES, "priority");
+    if (p !== t.priority) changes.push(`priority → ${PRIORITY_LABEL[p]}`);
+    t.priority = p;
+  }
+  if ("due" in body) {
+    const due = dueDate(body.due);
+    if (due !== t.due) changes.push(due ? `due date → ${formatDate(due)}` : "due date cleared");
+    t.due = due;
+  }
+  if ("notes" in body) {
+    const n = str(body.notes, "notes", LIMITS.notes, false, true);
+    if (n !== t.notes) changes.push(n ? "edited notes" : "cleared notes");
+    t.notes = n;
+  }
+  return changes;
+}
+
+export function updateTask(id: string, body: Obj, actorId: string | null) {
+  return mutate(actorId, (d, ctx) => {
+    const t = findTask(d, id);
+    const before = t.title;
+    const plan = planTextById().get(id);
+    const changes: string[] = [];
+
+    const wording: [keyof Pick<Task, "title" | "summary" | "description">, number, string][] = [
+      ["title", LIMITS.title, "title"],
+      ["summary", LIMITS.summary, "summary"],
+      ["description", LIMITS.description, "description"],
+    ];
+    for (const [k, max, label] of wording) {
+      if (!(k in body)) continue;
+      let v = str(body[k], label, max, false, k === "description");
+      // Empty resets plan tasks to the plan's wording; custom tasks need a title.
+      if (!v && plan) v = plan[k];
+      if (!v && k === "title") throw new HttpError(400, "title is required");
+      if (v === t[k]) continue;
+      t[k] = v;
+      changes.push(plan && v === plan[k] ? `reset ${label} to the plan` : k === "title" ? `renamed to “${short(v)}”` : `edited ${label}`);
+    }
+    if ("pillar" in body && t.type === "custom") {
+      const p = pillarField(body.pillar);
+      if (p !== t.pillar) changes.push(p ? `pillar → ${p}` : "pillar cleared");
+      t.pillar = p;
+      t.context = p ? `Custom · ${p}` : "Custom task";
+    }
+    changes.push(...applyState(d, t, body));
+    if (!changes.length) return;
+    t.updatedAt = now();
+    t.updatedBy = ctx.by;
+    ctx.log(before, changes.join("; "), id);
   });
 }
 
-export function createTask(body: Record<string, unknown>) {
-  return mutate((d) => {
-    const id = `custom:${randomUUID().slice(0, 8)}`;
-    d.custom.push({
-      id,
+export function createTask(body: Obj, actorId: string | null) {
+  return mutate(actorId, (d, ctx) => {
+    const ts = now();
+    const pillar = pillarField(body.pillar);
+    const t: Task = {
+      id: newId("custom:"),
+      type: "custom",
       title: str(body.title, "title", LIMITS.title, true),
-      detail: str(body.detail, "detail", LIMITS.detail),
-      pillar: pillar(body.pillar),
-      createdAt: new Date().toISOString(),
-    });
-    d.tasks[id] = { ...statePatch(body, d), updatedAt: new Date().toISOString() };
+      summary: str(body.summary, "summary", LIMITS.summary),
+      description: str(body.description, "description", LIMITS.description, false, true),
+      context: pillar ? `Custom · ${pillar}` : "Custom task",
+      pillar,
+      assigneeId: null,
+      assignee: null,
+      status: "todo",
+      priority: "medium",
+      due: null,
+      notes: "",
+      removed: false,
+      createdAt: ts,
+      updatedAt: ts,
+      updatedBy: ctx.by,
+    };
+    const extra = applyState(d, t, body);
+    d.tasks.push(t);
+    ctx.log(t.title, ["created the task", ...extra].join("; "), t.id);
   });
 }
 
-const exists = (d: BoardData, id: string) => isPlanTaskId(id) || d.custom.some((c) => c.id === id);
-
-/** Takes a task off the board. Its owner, status and notes are kept so it can be restored. */
-export function removeTask(id: string) {
-  return mutate((d) => {
-    if (!exists(d, id)) throw new HttpError(404, "Task not found");
-    if (!d.removed.includes(id)) d.removed.push(id);
+export function removeTask(id: string, actorId: string | null) {
+  return mutate(actorId, (d, ctx) => {
+    const t = findTask(d, id);
+    if (t.removed) return;
+    t.removed = true;
+    t.updatedAt = now();
+    t.updatedBy = ctx.by;
+    ctx.log(t.title, "removed from the board", id);
   });
 }
 
-/** Puts a removed task back on the board. */
-export function restoreTask(id: string) {
-  return mutate((d) => {
-    if (!exists(d, id)) throw new HttpError(404, "Task not found");
-    d.removed = d.removed.filter((r) => r !== id);
+export function restoreTask(id: string, actorId: string | null) {
+  return mutate(actorId, (d, ctx) => {
+    const t = findTask(d, id);
+    if (!t.removed) return;
+    t.removed = false;
+    t.updatedAt = now();
+    t.updatedBy = ctx.by;
+    ctx.log(t.title, "restored to the board", id);
   });
 }
 
 /** Permanently deletes a custom task. Plan tasks can only be removed, since they come from the plan. */
-export function deleteTaskForever(id: string) {
-  return mutate((d) => {
-    if (isPlanTaskId(id)) throw new HttpError(400, "Plan tasks can't be deleted permanently, only removed from the board");
-    if (!d.custom.some((c) => c.id === id)) throw new HttpError(404, "Task not found");
-    d.custom = d.custom.filter((c) => c.id !== id);
-    d.removed = d.removed.filter((r) => r !== id);
-    delete d.tasks[id];
-  });
+export function deleteTaskForever(id: string, actorId: string | null) {
+  return mutate(
+    actorId,
+    (d, ctx) => {
+      if (isPlanTaskId(id)) throw new HttpError(400, "Plan tasks can't be deleted permanently, only removed from the board");
+      const t = findTask(d, id);
+      d.tasks = d.tasks.filter((x) => x.id !== id);
+      ctx.log(t.title, "deleted permanently", id);
+    },
+    { forceBackup: "before-delete" },
+  );
 }
 
-export function addMember(body: Record<string, unknown>) {
-  return mutate((d) => {
+/* ------------------------------------------------------------------ */
+/* Team operations                                                     */
+/* ------------------------------------------------------------------ */
+
+function memberFields(body: Obj, d: BoardFile, selfId?: string) {
+  const out: Partial<Member> = {};
+  if ("name" in body || !selfId) {
     const name = str(body.name, "name", LIMITS.name, true);
-    const email = str(body.email, "email", LIMITS.email);
-    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, "email looks invalid");
-    if (d.members.some((m) => m.name.toLowerCase() === name.toLowerCase()))
+    if (d.team.some((m) => m.id !== selfId && m.name.toLowerCase() === name.toLowerCase()))
       throw new HttpError(409, `${name} is already on the team`);
-    d.members.push({ id: `m_${randomUUID().slice(0, 8)}`, name, role: str(body.role, "role", LIMITS.role), email });
+    out.name = name;
+  }
+  if ("role" in body) out.role = str(body.role, "role", LIMITS.role);
+  if ("email" in body) out.email = email(body.email);
+  return out;
+}
+
+export function addMember(body: Obj, actorId: string | null) {
+  return mutate(actorId, (d, ctx) => {
+    const f = memberFields(body, d);
+    const ts = now();
+    const m: Member = { id: newId("m_"), name: f.name!, role: f.role ?? "", email: f.email ?? "", addedAt: ts, updatedAt: ts };
+    d.team.push(m);
+    ctx.log(m.name, "added to the team");
   });
 }
 
-/** Edits a member's name, role or email. Only the fields present are changed. */
-export function updateMember(id: string, body: Record<string, unknown>) {
-  return mutate((d) => {
-    const m = d.members.find((x) => x.id === id);
-    if (!m) throw new HttpError(404, "Member not found");
-    if ("name" in body) {
-      const name = str(body.name, "name", LIMITS.name, true);
-      if (d.members.some((x) => x.id !== id && x.name.toLowerCase() === name.toLowerCase()))
-        throw new HttpError(409, `${name} is already on the team`);
-      m.name = name;
-    }
-    if ("role" in body) m.role = str(body.role, "role", LIMITS.role);
-    if ("email" in body) {
-      const email = str(body.email, "email", LIMITS.email);
-      if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw new HttpError(400, "email looks invalid");
-      m.email = email;
-    }
+export function updateMember(id: string, body: Obj, actorId: string | null) {
+  return mutate(actorId, (d, ctx) => {
+    const m = d.team.find((x) => x.id === id);
+    if (!m) throw new HttpError(404, "That person isn't on the team any more");
+    const f = memberFields(body, d, id);
+    const changes: string[] = [];
+    if (f.name !== undefined && f.name !== m.name) changes.push(`renamed from ${m.name}`);
+    if (f.role !== undefined && f.role !== m.role) changes.push(f.role ? `role → ${f.role}` : "role cleared");
+    if (f.email !== undefined && f.email !== m.email) changes.push(f.email ? `email → ${f.email}` : "email cleared");
+    if (!changes.length) return;
+    Object.assign(m, f, { updatedAt: now() });
+    ctx.log(m.name, changes.join("; "));
   });
 }
 
-/** Removes a member and returns their tasks to unassigned. */
-export function removeMember(id: string) {
-  return mutate((d) => {
-    if (!d.members.some((m) => m.id === id)) throw new HttpError(404, "Member not found");
-    d.members = d.members.filter((m) => m.id !== id);
-    for (const s of Object.values(d.tasks)) if (s.assigneeId === id) s.assigneeId = null;
-  });
+/** Removes a member; their tasks become unassigned. */
+export function removeMember(id: string, actorId: string | null) {
+  return mutate(
+    actorId,
+    (d, ctx) => {
+      const m = d.team.find((x) => x.id === id);
+      if (!m) throw new HttpError(404, "That person isn't on the team any more");
+      d.team = d.team.filter((x) => x.id !== id);
+      const freed = d.tasks.filter((t) => t.assigneeId === id);
+      for (const t of freed) {
+        t.assigneeId = null;
+        t.updatedAt = now();
+      }
+      ctx.log(m.name, `removed from the team${freed.length ? `; ${freed.length} task${freed.length === 1 ? "" : "s"} now unassigned` : ""}`);
+    },
+    { forceBackup: "before-remove-member" },
+  );
 }
+
+export type ImportResult = { added: number; updated: number; skipped: { entry: string; reason: string }[] };
+
+/**
+ * Adds people from a JSON list: [{ name, role?, email? }], or an object with a
+ * "team" or "members" array (so a downloaded board file works too).
+ * Matches existing people by email, then name; fills in a missing role or email.
+ */
+export async function importMembers(body: unknown, actorId: string | null) {
+  const list = Array.isArray(body) ? body : isObj(body) ? (body.team ?? body.members) : null;
+  if (!Array.isArray(list)) throw new HttpError(400, 'Expected a list of people: [{"name": "...", "role": "...", "email": "..."}]');
+  if (list.length > 500) throw new HttpError(400, "That's more than 500 people; split the file");
+  const result: ImportResult = { added: 0, updated: 0, skipped: [] };
+  const board = await mutate(
+    actorId,
+    (d, ctx) => {
+      const ts = now();
+      for (const [i, raw] of list.entries()) {
+        const label = isObj(raw) && typeof raw.name === "string" ? raw.name : `entry ${i + 1}`;
+        if (!isObj(raw)) {
+          result.skipped.push({ entry: label, reason: "not an object" });
+          continue;
+        }
+        const name = text(raw.name, LIMITS.name);
+        const role = text(raw.role, LIMITS.role);
+        const mail = text(raw.email, LIMITS.email);
+        if (!name) {
+          result.skipped.push({ entry: label, reason: "missing name" });
+          continue;
+        }
+        if (mail && !EMAIL.test(mail)) {
+          result.skipped.push({ entry: name, reason: `invalid email "${mail}"` });
+          continue;
+        }
+        const existing =
+          (mail && d.team.find((m) => m.email && m.email.toLowerCase() === mail.toLowerCase())) ||
+          d.team.find((m) => m.name.toLowerCase() === name.toLowerCase());
+        if (existing) {
+          const patch: Partial<Member> = {};
+          if (role && role !== existing.role) patch.role = role;
+          if (mail && mail !== existing.email) patch.email = mail;
+          if (Object.keys(patch).length) {
+            Object.assign(existing, patch, { updatedAt: ts });
+            result.updated++;
+          } else result.skipped.push({ entry: name, reason: "already on the team" });
+          continue;
+        }
+        d.team.push({ id: newId("m_"), name, role, email: mail, addedAt: ts, updatedAt: ts });
+        result.added++;
+      }
+      ctx.log("Team", `imported from JSON: ${result.added} added, ${result.updated} updated, ${result.skipped.length} skipped`);
+    },
+    { forceBackup: "before-import" },
+  );
+  return { ...board, result };
+}
+
+/* ------------------------------------------------------------------ */
+/* Route helpers                                                       */
+/* ------------------------------------------------------------------ */
 
 /** Wraps a route body: JSON errors for HttpError, 500 for anything else. */
-export async function handle(fn: () => Promise<BoardData>) {
+export async function handle(fn: () => Promise<unknown>) {
   try {
     return Response.json(await fn(), { headers: { "Cache-Control": "no-store" } });
   } catch (e) {
     if (e instanceof HttpError) return Response.json({ error: e.message }, { status: e.status });
     console.error(e);
-    return Response.json({ error: "Something went wrong saving tasks" }, { status: 500 });
+    return Response.json({ error: "Something went wrong saving the board. Nothing was changed." }, { status: 500 });
   }
 }
 
-export async function jsonBody(req: Request): Promise<Record<string, unknown>> {
+export async function jsonBody(req: Request): Promise<Obj> {
   try {
     const b = await req.json();
-    if (b && typeof b === "object" && !Array.isArray(b)) return b;
+    if (isObj(b)) return b;
   } catch {}
   throw new HttpError(400, "Expected a JSON object body");
 }
+
+export async function anyJson(req: Request): Promise<unknown> {
+  try {
+    return await req.json();
+  } catch {
+    throw new HttpError(400, "That isn't valid JSON");
+  }
+}
+
+/** The person making the change, sent by the page as x-actor-id. */
+export const actorOf = (req: Request) => req.headers.get("x-actor-id");

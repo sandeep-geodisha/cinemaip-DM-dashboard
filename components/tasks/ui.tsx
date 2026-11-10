@@ -1,5 +1,6 @@
 "use client";
 
+import type { ReactNode } from "react";
 import { PRIORITY_LABEL, STATUS_LABEL, type Member, type Priority, type Status } from "@/lib/tasks";
 import { useTasks } from "@/components/tasks/provider";
 
@@ -193,4 +194,49 @@ export function LiveStatus({ taskId }: { taskId: string }) {
   if (removedIds.has(taskId))
     return <span className="rounded-full border border-dashed border-line-2 px-2.5 py-0.5 text-[11px] text-faint">Not on board</span>;
   return <StatusPill status={byId.get(taskId)?.status ?? "todo"} />;
+}
+
+/**
+ * Renders a task description. Plain text, with two conventions:
+ * "Label: text" lines get a bold label, and "- item" lines become bullets.
+ */
+export function DescriptionView({ text }: { text: string }) {
+  const blocks: ReactNode[] = [];
+  let list: string[] = [];
+  const flush = (key: number) => {
+    if (!list.length) return;
+    blocks.push(
+      <ul key={`ul-${key}`} className="ml-4 list-disc space-y-1 marker:text-gold/70">
+        {list.map((item, i) => (
+          <li key={i}>{item}</li>
+        ))}
+      </ul>,
+    );
+    list = [];
+  };
+  text.split("\n").forEach((raw, i) => {
+    const line = raw.trim();
+    if (!line) return flush(i);
+    if (/^[-•*]\s+/.test(line)) {
+      list.push(line.replace(/^[-•*]\s+/, ""));
+      return;
+    }
+    flush(i);
+    const m = line.match(/^([^:]{2,40}):\s*(.*)$/);
+    if (m && !/^https?$/i.test(m[1]))
+      blocks.push(
+        m[2] ? (
+          <p key={i}>
+            <span className="font-medium text-fg">{m[1]}:</span> {m[2]}
+          </p>
+        ) : (
+          <p key={i} className="pt-1 font-medium text-fg">
+            {m[1]}
+          </p>
+        ),
+      );
+    else blocks.push(<p key={i}>{line}</p>);
+  });
+  flush(-1);
+  return <div className="space-y-2 text-sm leading-relaxed text-muted">{blocks}</div>;
 }

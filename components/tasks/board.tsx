@@ -18,7 +18,7 @@ import {
   type Task,
 } from "@/lib/tasks";
 import { SectionHead } from "@/components/section-head";
-import { useTasks } from "@/components/tasks/provider";
+import { useTasks, type ImportResult } from "@/components/tasks/provider";
 import { Avatar, OwnerChip, PriorityPill, StatusIcon, formatDue, statusColor } from "@/components/tasks/ui";
 import { PencilIcon, TrashIcon } from "@/components/tasks/editor";
 
@@ -37,8 +37,9 @@ function sortTasks(tasks: Task[]) {
 }
 
 export function TaskBoard() {
-  const { loaded, tasks, members, openNew, removedTasks } = useTasks();
+  const { loaded, tasks, members, openNew, removedTasks, fileError, activity } = useTasks();
   const [showRemoved, setShowRemoved] = useState(false);
+  const [showActivity, setShowActivity] = useState(false);
   const [kind, setKind] = useState<Kind | "">("");
   const [owner, setOwner] = useState<string>(""); // "" all, "none" unassigned, or member id
   const [query, setQuery] = useState("");
@@ -49,9 +50,9 @@ export function TaskBoard() {
     return sortTasks(
       tasks.filter(
         (t) =>
-          (!kind || t.kind === kind) &&
+          (!kind || t.type === kind) &&
           (!owner || (owner === "none" ? !t.assigneeId : t.assigneeId === owner)) &&
-          (!q || `${t.title} ${t.detail} ${t.context} ${t.notes}`.toLowerCase().includes(q)),
+          (!q || `${t.title} ${t.summary} ${t.description} ${t.context} ${t.notes} ${t.assignee ?? ""}`.toLowerCase().includes(q)),
       ),
     );
   }, [tasks, kind, owner, query]);
@@ -66,8 +67,18 @@ export function TaskBoard() {
             Who is doing <em className="gold-text not-italic">what</em>, and by when
           </>
         }
-        lede="Every decision, calendar activity and initiative is a task. Give each one an owner, a due date and a status. Changes save to the server, so everyone on the team sees the same board."
+        lede="Every decision, calendar activity and initiative is a task with a full brief. Give each one an owner, a due date and a status. Every change is saved to the board file straight away, so the whole team sees the same board."
       />
+
+      {fileError && (
+        <div role="alert" className="mt-10 rounded-2xl border border-st-blocked/50 bg-st-blocked/[0.08] px-5 py-4 text-sm">
+          <p className="font-medium text-st-blocked">The board file can&apos;t be read, so changes are paused</p>
+          <p className="mt-1 text-muted">
+            {fileError} You&apos;re seeing the last saved version. Fix <code className="font-mono">data/tasks.json</code>, or copy a good version
+            back from <code className="font-mono">data/backups/</code>; the board picks it up within a few seconds.
+          </p>
+        </div>
+      )}
 
       <div className="mt-12 grid gap-5 lg:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)]">
         <Progress />
@@ -79,7 +90,7 @@ export function TaskBoard() {
         <div className="flex flex-wrap gap-2" role="radiogroup" aria-label="Task type">
           {(["", ...KINDS] as const).map((k) => {
             const on = kind === k;
-            const n = k ? tasks.filter((t) => t.kind === k).length : tasks.length;
+            const n = k ? tasks.filter((t) => t.type === k).length : tasks.length;
             return (
               <button
                 key={k || "all"}
@@ -152,8 +163,23 @@ export function TaskBoard() {
         </div>
       </div>
 
-      {loaded && removedTasks.length > 0 && (
-        <div className="mt-3">
+      {loaded && (
+        <div className="mt-3 flex flex-wrap items-start gap-x-6 gap-y-2">
+          <button
+            onClick={() => setShowActivity((v) => !v)}
+            aria-expanded={showActivity}
+            className="inline-flex items-center gap-1.5 text-sm text-muted transition hover:text-fg"
+          >
+            <svg viewBox="0 0 16 16" className="size-3.5" aria-hidden fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round">
+              <circle cx="8" cy="8" r="6" />
+              <path d="M8 4.5V8l2.5 1.5" />
+            </svg>
+            Recent changes <span className="tabular rounded-full bg-panel-2 px-1.5 text-xs">{activity.length}</span>
+            <svg viewBox="0 0 16 16" className={`size-3 transition-transform ${showActivity ? "rotate-180" : ""}`} aria-hidden fill="none" stroke="currentColor" strokeWidth="1.7">
+              <path d="M3 6l5 5 5-5" />
+            </svg>
+          </button>
+          {removedTasks.length > 0 && (
           <button
             onClick={() => setShowRemoved((v) => !v)}
             aria-expanded={showRemoved}
@@ -165,7 +191,9 @@ export function TaskBoard() {
               <path d="M3 6l5 5 5-5" />
             </svg>
           </button>
-          {showRemoved && <RemovedPanel />}
+          )}
+          {showActivity && <ActivityPanel />}
+          {showRemoved && removedTasks.length > 0 && <RemovedPanel />}
         </div>
       )}
 
@@ -278,7 +306,25 @@ function Stat({ label, value, icon, warn, danger }: { label: string; value: numb
 /* ---------------- team ---------------- */
 
 function Team({ owner, onPick }: { owner: string; onPick: (id: string) => void }) {
-  const { loaded, members, tasks, addMember, notify } = useTasks();
+  const { loaded, members, tasks, addMember, notify, actor, setActor, importMembers } = useTasks();
+  const fileRef = useRef<HTMLInputElement>(null);
+  const [importReport, setImportReport] = useState<ImportResult | null>(null);
+
+  const onImport = async (file: File | undefined) => {
+    if (!file) return;
+    let json: unknown;
+    try {
+      json = JSON.parse(await file.text());
+    } catch {
+      notify(`${file.name} isn't valid JSON`, "error");
+      return;
+    }
+    const r = await importMembers(json);
+    if (r) {
+      setImportReport(r);
+      notify(`Imported ${file.name}: ${r.added} added, ${r.updated} updated, ${r.skipped.length} skipped`);
+    }
+  };
   const [name, setName] = useState("");
   const [role, setRole] = useState("");
   const [email, setEmail] = useState("");
@@ -307,15 +353,74 @@ function Team({ owner, onPick }: { owner: string; onPick: (id: string) => void }
 
   return (
     <div data-reveal data-spot className="card flex flex-col p-6 sm:p-7" style={{ ["--d" as string]: "120ms" }}>
-      <div className="flex items-baseline justify-between">
-        <h3 className="font-medium">Team</h3>
-        <p className="text-xs text-muted">{loaded ? `${members.length} ${members.length === 1 ? "person" : "people"}` : "…"} · click a name to filter</p>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 className="font-medium">
+          Team <span className="tabular ml-1 text-xs font-normal text-muted">{loaded ? members.length : "…"}</span>
+        </h3>
+        <div className="flex items-center gap-1.5">
+          <input ref={fileRef} type="file" accept="application/json,.json" className="hidden" onChange={(e) => { onImport(e.target.files?.[0]); e.target.value = ""; }} />
+          <button
+            onClick={() => fileRef.current?.click()}
+            title='Add people from a JSON file: [{"name": "...", "role": "...", "email": "..."}]'
+            className="rounded-full border border-line px-3 py-1 text-xs text-muted transition hover:border-gold/60 hover:text-fg"
+          >
+            Import JSON
+          </button>
+          <a
+            href="/api/export"
+            title="Download the whole board file: team, tasks and history"
+            className="rounded-full border border-line px-3 py-1 text-xs text-muted transition hover:border-gold/60 hover:text-fg"
+          >
+            Export
+          </a>
+        </div>
       </div>
+
+      {loaded && members.length > 0 && (
+        <label className="mt-3 flex items-center gap-2 rounded-xl border border-line bg-panel px-3 py-2 text-xs text-muted">
+          <span className="shrink-0">You are</span>
+          <select
+            value={actor?.id ?? ""}
+            onChange={(e) => setActor(e.target.value || null)}
+            className="min-w-0 flex-1 bg-transparent text-sm text-fg focus:outline-none"
+          >
+            <option value="">Choose your name, so changes show who made them</option>
+            {members.map((m) => (
+              <option key={m.id} value={m.id}>
+                {m.name}
+              </option>
+            ))}
+          </select>
+          {actor && <Avatar member={actor} size={22} />}
+        </label>
+      )}
+
+      {importReport && (
+        <div className="toast-in mt-3 rounded-xl border border-line bg-panel px-3.5 py-3 text-xs">
+          <div className="flex items-center justify-between">
+            <span className="text-fg">
+              Import: {importReport.added} added · {importReport.updated} updated · {importReport.skipped.length} skipped
+            </span>
+            <button onClick={() => setImportReport(null)} className="text-muted hover:text-fg" aria-label="Dismiss">
+              ✕
+            </button>
+          </div>
+          {importReport.skipped.length > 0 && (
+            <ul className="mt-1.5 max-h-24 space-y-0.5 overflow-y-auto text-muted">
+              {importReport.skipped.map((s, i) => (
+                <li key={i}>
+                  {s.entry}: {s.reason}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
 
       <ul className="mt-4 flex max-h-80 flex-col gap-1 overflow-y-auto pr-1">
         {loaded && members.length === 0 && (
           <li className="rounded-xl border border-dashed border-line-2 px-4 py-5 text-center text-sm text-muted">
-            Add the people who will own this plan. You can then assign any task to them.
+            Add the people who will own this plan, or import them from a JSON file. You can then assign any task to them.
           </li>
         )}
         {members.map((m) => (
@@ -502,19 +607,77 @@ function MemberRow({
   );
 }
 
+/* ---------------- activity ---------------- */
+
+function timeAgo(iso: string) {
+  const s = Math.round((Date.now() - Date.parse(iso)) / 1000);
+  if (s < 45) return "just now";
+  if (s < 3600) return `${Math.round(s / 60)} min ago`;
+  if (s < 86400) return `${Math.round(s / 3600)} h ago`;
+  return new Date(iso).toLocaleDateString("en-IN", { day: "numeric", month: "short" });
+}
+
+function ActivityPanel() {
+  const { activity, byId, openTask } = useTasks();
+  const [limit, setLimit] = useState(20);
+  return (
+    <div className="toast-in w-full overflow-hidden rounded-2xl border border-line bg-panel">
+      <p className="flex items-center justify-between px-4 py-2.5 text-[11px] font-medium tracking-[0.16em] text-muted uppercase">
+        Recent changes
+        <a href="/api/export" className="tracking-normal normal-case text-gold-ink hover:underline">
+          Download full board file
+        </a>
+      </p>
+      {activity.length === 0 ? (
+        <p className="border-t border-line px-4 py-4 text-sm text-faint">No changes yet.</p>
+      ) : (
+        <ol className="divide-y divide-line border-t border-line">
+          {activity.slice(0, limit).map((a) => {
+            const t = a.taskId ? byId.get(a.taskId) : undefined;
+            return (
+              <li key={a.id} className="flex items-baseline gap-3 px-4 py-2.5 text-sm">
+                <span className="tabular w-20 shrink-0 text-xs text-faint" title={new Date(a.at).toLocaleString("en-IN")}>
+                  {timeAgo(a.at)}
+                </span>
+                <span className="min-w-0 flex-1">
+                  <span className="font-medium">{a.by}</span>{" "}
+                  {t ? (
+                    <button onClick={() => openTask(t.id)} className="text-gold-ink hover:underline">
+                      {a.subject}
+                    </button>
+                  ) : (
+                    <span className="text-fg">{a.subject}</span>
+                  )}
+                  <span className="text-muted"> · {a.action}</span>
+                </span>
+              </li>
+            );
+          })}
+        </ol>
+      )}
+      {activity.length > limit && (
+        <button onClick={() => setLimit((l) => l + 30)} className="w-full border-t border-line px-4 py-2 text-xs text-muted hover:text-fg">
+          Show more
+        </button>
+      )}
+    </div>
+  );
+}
+
 /* ---------------- removed tasks ---------------- */
 
 function RemovedPanel() {
   const { removedTasks, restore, deleteForever, notify } = useTasks();
   const [confirm, setConfirm] = useState<string | null>(null);
   return (
-    <ul className="toast-in mt-3 flex flex-col divide-y divide-line overflow-hidden rounded-2xl border border-line bg-panel">
+    <ul className="toast-in flex w-full flex-col divide-y divide-line overflow-hidden rounded-2xl border border-line bg-panel">
+      <li className="px-4 py-2.5 text-[11px] font-medium tracking-[0.16em] text-muted uppercase">Removed tasks</li>
       {removedTasks.map((t) => (
         <li key={t.id} className="flex flex-wrap items-center gap-3 px-4 py-3">
           <span className="min-w-0 flex-1">
             <span className="block truncate text-sm text-muted line-through decoration-faint">{t.title}</span>
             <span className="block truncate text-xs text-faint">
-              {KIND_LABEL[t.kind]} · {t.context}
+              {KIND_LABEL[t.type]} · {t.context}
             </span>
           </span>
           {confirm === t.id ? (
@@ -541,7 +704,7 @@ function RemovedPanel() {
               >
                 Restore
               </button>
-              {t.kind === "custom" && (
+              {t.type === "custom" && (
                 <button onClick={() => setConfirm(t.id)} className="rounded-full px-3 py-1 text-xs text-st-blocked transition hover:bg-st-blocked/10">
                   Delete forever
                 </button>
@@ -655,13 +818,14 @@ function TaskCard({ task: t }: { task: Task }) {
       <div className="flex items-center justify-between gap-2">
         <span className="flex min-w-0 items-center gap-1.5 text-[10px] tracking-[0.14em] text-faint uppercase">
           {t.pillar && <span className="size-1.5 shrink-0 rounded-full" style={{ background: pillarColor(t.pillar) }} />}
-          <span className="truncate">{KIND_LABEL[t.kind]}</span>
+          <span className="truncate">{KIND_LABEL[t.type]}</span>
         </span>
         <PriorityPill priority={t.priority} />
       </div>
       <button onClick={() => openTask(t.id)} className="mt-2 block w-full text-left">
         <span className="line-clamp-2 text-sm leading-snug font-medium group-hover:text-gold-ink">{t.title}</span>
-        <span className="mt-1 block truncate text-xs text-muted">{t.kind === "activity" ? `${t.detail} · ${t.context}` : t.context}</span>
+        {t.summary && <span className="mt-1 line-clamp-2 text-xs leading-snug text-muted">{t.summary}</span>}
+        <span className="mt-1 block truncate text-[11px] text-faint">{t.context}</span>
       </button>
       <div className="mt-3 flex items-center justify-between gap-2">
         {t.due ? (
@@ -721,7 +885,7 @@ function ListView({ tasks }: { tasks: Task[] }) {
                   <span className="line-clamp-1 font-medium">{t.title}</span>
                   <span className="mt-0.5 flex items-center gap-1.5 text-xs text-muted">
                     {t.pillar && <span className="size-1.5 rounded-full" style={{ background: pillarColor(t.pillar) }} />}
-                    {KIND_LABEL[t.kind]} · <span className="truncate">{t.context}</span>
+                    {KIND_LABEL[t.type]} · <span className="truncate">{t.context}</span>
                   </span>
                 </button>
               </td>

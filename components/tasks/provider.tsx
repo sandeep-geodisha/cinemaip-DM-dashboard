@@ -1,29 +1,43 @@
 "use client";
 
-import { createContext, useCallback, useContext, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
-import { buildAllTasks, type BoardData, type Member, type Task, type TaskState } from "@/lib/tasks";
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  useSyncExternalStore,
+  type ReactNode,
+} from "react";
+import { planTextById, type ActivityEntry, type BoardResponse, type Member, type Task } from "@/lib/tasks";
 import { TaskEditor } from "@/components/tasks/editor";
 
-type Patch = Partial<Pick<TaskState, "assigneeId" | "status" | "priority" | "due" | "notes">> & {
-  title?: string;
-  detail?: string;
+export type Patch = Partial<Pick<Task, "assigneeId" | "status" | "priority" | "due" | "notes" | "title" | "summary" | "description">> & {
   pillar?: string | null;
 };
 
 type Editing = { mode: "edit"; id: string } | { mode: "new" } | null;
-
 type ToastAction = { label: string; run: () => void };
+export type ImportResult = { added: number; updated: number; skipped: { entry: string; reason: string }[] };
 
 type Ctx = {
   loaded: boolean;
+  /** Set when data/tasks.json can't be read; edits are paused. */
+  fileError: string | null;
   /** Tasks on the board. */
   tasks: Task[];
   byId: Map<string, Task>;
-  /** Tasks taken off the board, newest first. */
+  /** Tasks taken off the board, most recently changed first. */
   removedTasks: Task[];
   removedIds: Set<string>;
   members: Member[];
   memberById: Map<string, Member>;
+  activity: ActivityEntry[];
+  /** The team member using this browser (for "who changed what"). */
+  actor: Member | null;
+  setActor: (id: string | null) => void;
   update: (id: string, patch: Patch) => Promise<boolean>;
   create: (body: Patch & { title: string }) => Promise<boolean>;
   /** Takes a task off the board, with an Undo toast. */
@@ -34,6 +48,7 @@ type Ctx = {
   addMember: (m: { name: string; role?: string; email?: string }) => Promise<Member | null>;
   updateMember: (id: string, m: { name?: string; role?: string; email?: string }) => Promise<boolean>;
   removeMember: (id: string) => Promise<boolean>;
+  importMembers: (json: unknown) => Promise<ImportResult | null>;
   openTask: (id: string) => void;
   openNew: () => void;
   notify: (msg: string, tone?: "ok" | "error", action?: ToastAction) => void;
@@ -47,17 +62,50 @@ export function useTasks() {
   return c;
 }
 
-const POLL_MS = 15000;
+const POLL_MS = 4000;
+
+/* "Who am I" is remembered per browser. */
+const ACTOR_KEY = "cinemaip-actor";
+const actorListeners = new Set<() => void>();
+const readActor = () => {
+  try {
+    return localStorage.getItem(ACTOR_KEY);
+  } catch {
+    return null;
+  }
+};
+const subscribeActor = (cb: () => void) => {
+  actorListeners.add(cb);
+  window.addEventListener("storage", cb);
+  return () => {
+    actorListeners.delete(cb);
+    window.removeEventListener("storage", cb);
+  };
+};
+const writeActor = (id: string | null) => {
+  try {
+    if (id) localStorage.setItem(ACTOR_KEY, id);
+    else localStorage.removeItem(ACTOR_KEY);
+  } catch {}
+  actorListeners.forEach((l) => l());
+};
 
 /**
  * Holds the shared task board. Loads it from /api/tasks, applies edits
- * optimistically, and polls so assignments made by others show up.
+ * optimistically, and polls (cheaply, by etag) so changes made by anyone,
+ * including hand edits to the JSON file, show up within a few seconds.
  */
 export function TasksProvider({ children }: { children: ReactNode }) {
-  const [data, setData] = useState<BoardData | null>(null);
+  const [data, setData] = useState<BoardResponse | null>(null);
   const [editing, setEditing] = useState<Editing>(null);
   const [toast, setToast] = useState<{ msg: string; tone: "ok" | "error"; key: number; action?: ToastAction } | null>(null);
   const pending = useRef(0);
+  const etag = useRef<string | null>(null);
+  const actorId = useSyncExternalStore(subscribeActor, readActor, () => null);
+  const actorRef = useRef<string | null>(null);
+  useEffect(() => {
+    actorRef.current = actorId;
+  }, [actorId]);
 
   const notify = useCallback((msg: string, tone: "ok" | "error" = "ok", action?: ToastAction) => {
     setToast({ msg, tone, key: Date.now(), action });
@@ -69,13 +117,18 @@ export function TasksProvider({ children }: { children: ReactNode }) {
     return () => window.clearTimeout(t);
   }, [toast]);
 
+  const accept = useCallback((b: BoardResponse) => {
+    etag.current = b.etag;
+    setData(b);
+  }, []);
+
   const call = useCallback(
-    async (url: string, init?: RequestInit): Promise<BoardData | null> => {
+    async (url: string, init?: RequestInit): Promise<(BoardResponse & { result?: ImportResult }) | null> => {
       pending.current++;
       try {
         const res = await fetch(url, {
           ...init,
-          headers: { "Content-Type": "application/json" },
+          headers: { "Content-Type": "application/json", ...(actorRef.current && { "x-actor-id": actorRef.current }) },
           cache: "no-store",
         });
         const json = await res.json().catch(() => ({}));
@@ -83,91 +136,83 @@ export function TasksProvider({ children }: { children: ReactNode }) {
           notify(json.error ?? `Request failed (${res.status})`, "error");
           return null;
         }
-        setData(json as BoardData);
-        return json as BoardData;
+        accept(json as BoardResponse);
+        return json;
       } catch {
-        notify("Couldn't reach the server. Changes weren't saved.", "error");
+        notify("Couldn't reach the server. That change wasn't saved.", "error");
         return null;
       } finally {
         pending.current--;
       }
     },
-    [notify],
+    [notify, accept],
+  );
+
+  const refresh = useCallback(
+    async (force = false) => {
+      if (pending.current > 0) return;
+      try {
+        const q = !force && etag.current ? `?etag=${encodeURIComponent(etag.current)}` : "";
+        const res = await fetch(`/api/tasks${q}`, { cache: "no-store" });
+        if (res.status === 204 || pending.current > 0) return;
+        if (res.ok) accept(await res.json());
+      } catch {}
+    },
+    [accept],
   );
 
   // Initial load, polling, and refresh when the tab regains focus.
   useEffect(() => {
-    let alive = true;
-    const refresh = async () => {
-      if (pending.current > 0) return;
-      try {
-        const res = await fetch("/api/tasks", { cache: "no-store" });
-        if (res.ok && alive && pending.current === 0) setData(await res.json());
-      } catch {}
-    };
-    refresh();
-    const iv = window.setInterval(refresh, POLL_MS);
+    refresh(true);
+    const iv = window.setInterval(() => document.visibilityState === "visible" && refresh(), POLL_MS);
     const onVis = () => document.visibilityState === "visible" && refresh();
     document.addEventListener("visibilitychange", onVis);
+    window.addEventListener("focus", onVis);
     return () => {
-      alive = false;
       window.clearInterval(iv);
       document.removeEventListener("visibilitychange", onVis);
+      window.removeEventListener("focus", onVis);
     };
+  }, [refresh]);
+
+  const patchLocal = useCallback((id: string, fn: (t: Task) => Task) => {
+    setData((d) => d && { ...d, tasks: d.tasks.map((t) => (t.id === id ? fn(t) : t)) });
   }, []);
 
   const update = useCallback(
     async (id: string, patch: Patch) => {
       // Optimistic: show the change now; the server's reply replaces it.
-      setData((d) => {
-        if (!d) return d;
-        const { title, detail, pillar, ...state } = patch;
-        if (d.custom.some((c) => c.id === id)) {
-          const custom = d.custom.map((c) =>
-            c.id === id
-              ? {
-                  ...c,
-                  ...(title !== undefined && { title }),
-                  ...(detail !== undefined && { detail }),
-                  ...(pillar !== undefined && { pillar: pillar as never }),
-                }
-              : c,
-          );
-          return { ...d, custom, tasks: { ...d.tasks, [id]: { ...d.tasks[id], ...state } } };
-        }
-        // Plan task: wording is stored as an override; empty resets to the plan.
-        const next = { ...d.tasks[id], ...state };
-        for (const [k, v] of [["title", title], ["detail", detail]] as const) {
-          if (v === undefined) continue;
-          if (v.trim()) next[k] = v.trim();
-          else delete next[k];
-        }
-        return { ...d, tasks: { ...d.tasks, [id]: next } };
+      const plan = planTextById().get(id);
+      patchLocal(id, (t) => {
+        const next = { ...t, ...patch } as Task;
+        for (const k of ["title", "summary", "description"] as const)
+          if (patch[k] !== undefined && !patch[k]?.trim() && plan) next[k] = plan[k];
+        return next;
       });
       const ok = !!(await call(`/api/tasks/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(patch) }));
-      if (!ok) {
-        const res = await fetch("/api/tasks", { cache: "no-store" }).catch(() => null);
-        if (res?.ok) setData(await res.json());
-      }
+      if (!ok) refresh(true);
       return ok;
     },
-    [call],
+    [call, patchLocal, refresh],
   );
 
   const restore = useCallback(
     async (id: string) => {
-      setData((d) => d && { ...d, removed: d.removed.filter((r) => r !== id) });
-      return !!(await call(`/api/tasks/${encodeURIComponent(id)}/restore`, { method: "POST" }));
+      patchLocal(id, (t) => ({ ...t, removed: false }));
+      const ok = !!(await call(`/api/tasks/${encodeURIComponent(id)}/restore`, { method: "POST" }));
+      if (!ok) refresh(true);
+      return ok;
     },
-    [call],
+    [call, patchLocal, refresh],
   );
 
   const remove = useCallback(
     async (id: string) => {
-      const title = data ? buildAllTasks(data).find((t) => t.id === id)?.title : undefined;
-      setData((d) => d && { ...d, removed: d.removed.includes(id) ? d.removed : [...d.removed, id] });
+      const title = data?.tasks.find((t) => t.id === id)?.title;
+      patchLocal(id, (t) => ({ ...t, removed: true }));
       const ok = !!(await call(`/api/tasks/${encodeURIComponent(id)}`, { method: "DELETE" }));
-      if (ok)
+      if (!ok) refresh(true);
+      else
         notify(title ? `Removed “${title.length > 40 ? title.slice(0, 40) + "…" : title}”` : "Task removed", "ok", {
           label: "Undo",
           run: () => {
@@ -176,43 +221,46 @@ export function TasksProvider({ children }: { children: ReactNode }) {
         });
       return ok;
     },
-    [call, data, notify, restore],
+    [call, data, notify, patchLocal, refresh, restore],
   );
 
   const value = useMemo<Ctx>(() => {
-    const all = data ? buildAllTasks(data) : [];
-    const removedIds = new Set(data?.removed ?? []);
-    const tasks = all.filter((t) => !removedIds.has(t.id));
-    const order = data?.removed ?? [];
-    const removedTasks = all.filter((t) => removedIds.has(t.id)).sort((a, b) => order.indexOf(b.id) - order.indexOf(a.id));
-    const members = data?.members ?? [];
+    const all = data?.tasks ?? [];
+    const tasks = all.filter((t) => !t.removed);
+    const removedTasks = all.filter((t) => t.removed).sort((a, b) => b.updatedAt.localeCompare(a.updatedAt));
+    const members = data?.team ?? [];
+    const memberById = new Map(members.map((m) => [m.id, m]));
     return {
       loaded: !!data,
+      fileError: data?.fileError ?? null,
       tasks,
       byId: new Map(tasks.map((t) => [t.id, t])),
       removedTasks,
-      removedIds,
+      removedIds: new Set(removedTasks.map((t) => t.id)),
       members,
-      memberById: new Map(members.map((m) => [m.id, m])),
+      memberById,
+      activity: data?.activity ?? [],
+      actor: (actorId && memberById.get(actorId)) || null,
+      setActor: writeActor,
       update,
       create: async (body) => !!(await call("/api/tasks", { method: "POST", body: JSON.stringify(body) })),
       remove,
       restore,
-      deleteForever: async (id) =>
-        !!(await call(`/api/tasks/${encodeURIComponent(id)}?permanent=1`, { method: "DELETE" })),
+      deleteForever: async (id) => !!(await call(`/api/tasks/${encodeURIComponent(id)}?permanent=1`, { method: "DELETE" })),
       addMember: async (m) => {
         const d = await call("/api/members", { method: "POST", body: JSON.stringify(m) });
         const name = m.name.trim().toLowerCase();
-        return d?.members.find((x) => x.name.toLowerCase() === name) ?? null;
+        return d?.team.find((x) => x.name.toLowerCase() === name) ?? null;
       },
       updateMember: async (id, m) =>
         !!(await call(`/api/members/${encodeURIComponent(id)}`, { method: "PATCH", body: JSON.stringify(m) })),
       removeMember: async (id) => !!(await call(`/api/members/${encodeURIComponent(id)}`, { method: "DELETE" })),
+      importMembers: async (json) => (await call("/api/members/import", { method: "POST", body: JSON.stringify(json) }))?.result ?? null,
       openTask: (id) => setEditing({ mode: "edit", id }),
       openNew: () => setEditing({ mode: "new" }),
       notify,
     };
-  }, [data, call, update, notify, remove, restore]);
+  }, [data, actorId, call, update, notify, remove, restore]);
 
   return (
     <TasksContext.Provider value={value}>
@@ -222,14 +270,12 @@ export function TasksProvider({ children }: { children: ReactNode }) {
         {toast && (
           <div
             key={toast.key}
-            className={`toast-in pointer-events-auto flex items-center gap-2.5 rounded-full border px-4 py-2.5 text-sm shadow-[var(--shadow)] backdrop-blur-xl ${
-              toast.tone === "error"
-                ? "border-st-blocked/40 bg-popover/95 text-fg"
-                : "border-line-2 bg-popover/95 text-fg"
+            className={`toast-in pointer-events-auto flex max-w-[min(640px,100%)] items-center gap-2.5 rounded-full border px-4 py-2.5 text-sm shadow-[var(--shadow)] backdrop-blur-xl ${
+              toast.tone === "error" ? "border-st-blocked/40 bg-popover/95 text-fg" : "border-line-2 bg-popover/95 text-fg"
             }`}
           >
             <span className={`size-2 shrink-0 rounded-full ${toast.tone === "error" ? "bg-st-blocked" : "bg-st-done"}`} />
-            {toast.msg}
+            <span className="min-w-0">{toast.msg}</span>
             {toast.action && (
               <button
                 type="button"
@@ -237,7 +283,7 @@ export function TasksProvider({ children }: { children: ReactNode }) {
                   toast.action?.run();
                   setToast(null);
                 }}
-                className="-my-1 -mr-2 ml-1 rounded-full bg-gold px-3 py-1 text-xs font-semibold text-black transition hover:bg-gold-2"
+                className="-my-1 -mr-2 ml-1 shrink-0 rounded-full bg-gold px-3 py-1 text-xs font-semibold text-black transition hover:bg-gold-2"
               >
                 {toast.action.label}
               </button>
@@ -248,3 +294,4 @@ export function TasksProvider({ children }: { children: ReactNode }) {
     </TasksContext.Provider>
   );
 }
+
