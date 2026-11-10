@@ -1,6 +1,8 @@
 "use client";
 
+import Image from "next/image";
 import { useEffect, useState, useSyncExternalStore, type MouseEvent } from "react";
+import logo from "@/assets/brand/cinemaip-logo.png";
 
 const LINKS = [
   { id: "targets", label: "Targets" },
@@ -56,10 +58,7 @@ export function Nav() {
       />
       <nav className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-4 px-4 sm:px-6">
         <a href="#top" className="group flex items-center gap-2.5" aria-label="CinemaIP, back to top">
-          <Reel />
-          <span className="font-display text-[16px]">
-            Cinema<span className="text-gold-ink">IP</span>
-          </span>
+          <Image src={logo} alt="CinemaIP" priority unoptimized className="h-6 w-auto transition-transform duration-500 group-hover:scale-[1.03] sm:h-7" />
           <span className="hidden rounded-full border border-line px-2 py-0.5 text-[10px] tracking-[0.18em] text-muted uppercase sm:inline">
             Marketing plan
           </span>
@@ -95,25 +94,6 @@ export function Nav() {
   );
 }
 
-function Reel() {
-  return (
-    <svg viewBox="0 0 32 32" className="size-7 text-gold-ink transition-transform duration-700 group-hover:rotate-90" aria-hidden>
-      <circle cx="16" cy="16" r="14" fill="none" stroke="currentColor" strokeWidth="1.6" />
-      <circle cx="16" cy="16" r="2.4" fill="currentColor" />
-      {[0, 72, 144, 216, 288].map((a) => (
-        <circle
-          key={a}
-          cx={16 + 7.5 * Math.cos((a * Math.PI) / 180)}
-          cy={16 + 7.5 * Math.sin((a * Math.PI) / 180)}
-          r="3"
-          fill="none"
-          stroke="currentColor"
-          strokeWidth="1.4"
-        />
-      ))}
-    </svg>
-  );
-}
 
 type Theme = "light" | "dark";
 

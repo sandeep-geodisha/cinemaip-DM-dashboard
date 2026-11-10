@@ -1,4 +1,6 @@
 import { ActsSection, BudgetSection, PillarProvider, SlateSection } from "@/components/budget-explorer";
+import Image from "next/image";
+import logo from "@/assets/brand/cinemaip-logo.png";
 import { CountUp, Effects } from "@/components/effects";
 import { Nav } from "@/components/nav";
 import { SectionHead } from "@/components/section-head";
@@ -432,12 +434,12 @@ export default function Home() {
               <li>Cash per user divides total cash by the registered-user goal. It ignores team time, which is the plan&apos;s real cost.</li>
             </ul>
           </div>
-          <div aria-hidden className="pointer-events-none select-none text-center font-display text-[18vw] leading-[0.85] text-fg/[0.04]">
-            Fin.
+          <div data-reveal className="relative mx-auto flex max-w-3xl flex-col items-center px-4 pb-20 text-center">
+            <div aria-hidden className="pointer-events-none absolute top-[40%] left-1/2 h-40 w-[70%] -translate-x-1/2 -translate-y-1/2 rounded-full bg-[#ff8000]/10 blur-3xl" />
+            <Image src={logo} alt="CinemaIP" unoptimized className="relative h-auto w-[min(520px,78vw)]" />
+            <p className="relative mt-6 text-[11px] tracking-[0.3em] text-faint uppercase">Digital marketing plan · Six months · Lean budget</p>
           </div>
-          <div className="border-t border-line py-6 text-center text-xs text-faint">
-            Cinema<span className="text-gold-ink">IP</span> · Digital marketing plan · Six months
-          </div>
+          <div className="border-t border-line py-6 text-center text-xs text-faint">Planning estimates, not quotes · Built for the CinemaIP team</div>
         </footer>
       </main>
       </PillarProvider>
