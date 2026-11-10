@@ -1,26 +1,462 @@
 @import "tailwindcss";
 
-:root {
-  --background: #ffffff;
-  --foreground: #171717;
+/*
+  CinemaIP marketing plan: a cinematic theme in dark (default) and light.
+  Gold is the brand accent and marks "paid on result". The four pillar hues are a
+  validated categorical palette per theme (CVD-checked against each surface) and
+  always follow the pillar, never its rank.
+  The theme lives on <html data-theme>, set before paint by the script in layout.tsx.
+*/
+:root,
+:root[data-theme="dark"] {
+  --bg: #07070b;
+  --bg-2: #0e0e15;
+  --tint: 255 255 255;
+  --panel: rgb(255 255 255 / 0.028);
+  --panel-2: rgb(255 255 255 / 0.05);
+  --line: rgb(255 255 255 / 0.08);
+  --line-2: rgb(255 255 255 / 0.15);
+  --fg: #f3eee5;
+  --muted: #a7a196;
+  --faint: #8a857b;
+  --gold: #e8b65a;
+  --gold-2: #f7dfa6;
+  --gold-deep: #9c7128;
+  --gold-ink: #e8b65a;
+  --upfront: #cfc8bb;
+  --pillar-1: #38a897;
+  --pillar-2: #e06b5f;
+  --pillar-3: #8f78e6;
+  --pillar-4: #b88a36;
+  --popover: #14141c;
+  --card-a: rgb(255 255 255 / 0.04);
+  --card-b: rgb(255 255 255 / 0.015);
+  --card-shadow: none;
+  --ticket-a: #1b1710;
+  --ticket-b: #0e0d0b;
+  --beam: 247 223 166;
+  --vignette: rgb(0 0 0 / 0.65);
+  --grain: 0.06;
+  --orb-violet: rgb(143 120 230 / 0.18);
+  --orb-gold: rgb(232 182 90 / 0.15);
+  --shadow: 0 30px 80px -20px rgb(0 0 0 / 0.7);
+  --st-todo: #a7a196;
+  --st-progress: #6aa8f5;
+  --st-blocked: #f07272;
+  --st-done: #4cc38a;
+  color-scheme: dark;
+}
+
+:root[data-theme="light"] {
+  --bg: #f8f4ec;
+  --bg-2: #f1ebdf;
+  --tint: 40 28 8;
+  --panel: rgb(40 28 8 / 0.03);
+  --panel-2: rgb(40 28 8 / 0.06);
+  --line: rgb(40 28 8 / 0.1);
+  --line-2: rgb(40 28 8 / 0.2);
+  --fg: #1a1610;
+  --muted: #5c5447;
+  --faint: #70675a;
+  --gold: #d29a35;
+  --gold-2: #e9bd67;
+  --gold-deep: #8a5d12;
+  --gold-ink: #87590c;
+  --upfront: #9a9184;
+  --pillar-1: #0e9483;
+  --pillar-2: #d0574b;
+  --pillar-3: #7a62d6;
+  --pillar-4: #a8771f;
+  --popover: #fffdf8;
+  --card-a: rgb(255 255 255 / 0.9);
+  --card-b: rgb(255 255 255 / 0.6);
+  --card-shadow: 0 1px 2px rgb(40 28 8 / 0.04), 0 12px 32px -16px rgb(40 28 8 / 0.18);
+  --ticket-a: #fffaf0;
+  --ticket-b: #f2e4c8;
+  --beam: 214 160 60;
+  --vignette: rgb(120 88 30 / 0.12);
+  --grain: 0.035;
+  --orb-violet: rgb(122 98 214 / 0.12);
+  --orb-gold: rgb(210 154 53 / 0.2);
+  --shadow: 0 30px 70px -24px rgb(60 40 10 / 0.3);
+  --st-todo: #70675a;
+  --st-progress: #2f6fcf;
+  --st-blocked: #c43d3d;
+  --st-done: #1f8a55;
+  color-scheme: light;
 }
 
 @theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
-  --font-sans: var(--font-geist-sans);
+  --color-bg: var(--bg);
+  --color-bg-2: var(--bg-2);
+  --color-panel: var(--panel);
+  --color-panel-2: var(--panel-2);
+  --color-line: var(--line);
+  --color-line-2: var(--line-2);
+  --color-fg: var(--fg);
+  --color-muted: var(--muted);
+  --color-faint: var(--faint);
+  --color-gold: var(--gold);
+  --color-gold-2: var(--gold-2);
+  --color-gold-ink: var(--gold-ink);
+  --color-upfront: var(--upfront);
+  --color-popover: var(--popover);
+  --color-st-todo: var(--st-todo);
+  --color-st-progress: var(--st-progress);
+  --color-st-blocked: var(--st-blocked);
+  --color-st-done: var(--st-done);
+  --font-sans: var(--font-body);
   --font-mono: var(--font-geist-mono);
+  --font-display: var(--font-heading);
 }
 
-@media (prefers-color-scheme: dark) {
-  :root {
-    --background: #0a0a0a;
-    --foreground: #ededed;
+/* Headline face: tight, confident tracking. In the base layer so utilities can override. */
+@layer base {
+  .font-display {
+    font-weight: 600;
+    letter-spacing: -0.035em;
   }
 }
 
+html {
+  scroll-behavior: smooth;
+  scroll-padding-top: 84px;
+}
+
 body {
-  background: var(--background);
-  color: var(--foreground);
-  font-family: Arial, Helvetica, sans-serif;
+  background: var(--bg);
+  color: var(--fg);
+  overflow-x: hidden;
+}
+
+::selection {
+  background: color-mix(in srgb, var(--gold) 40%, transparent);
+  color: var(--fg);
+}
+
+.tabular {
+  font-variant-numeric: tabular-nums;
+}
+
+/* ---------- Atmosphere ---------- */
+
+/* Film grain over everything; pointer-events off so it never blocks clicks. */
+.grain {
+  position: fixed;
+  inset: -50%;
+  z-index: 60;
+  pointer-events: none;
+  opacity: var(--grain);
+  background-image: url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='160' height='160'><filter id='n'><feTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/></filter><rect width='100%' height='100%' filter='url(%23n)'/></svg>");
+  animation: grain 1.2s steps(6) infinite;
+}
+
+@keyframes grain {
+  0% { transform: translate(0, 0); }
+  20% { transform: translate(-3%, 2%); }
+  40% { transform: translate(2%, -4%); }
+  60% { transform: translate(-4%, -1%); }
+  80% { transform: translate(3%, 3%); }
+  100% { transform: translate(0, 0); }
+}
+
+.vignette {
+  position: fixed;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  background: radial-gradient(ellipse at 50% 30%, transparent 40%, var(--vignette) 100%);
+}
+
+/* The projector beam in the hero. */
+.beam {
+  position: absolute;
+  left: 50%;
+  top: -10%;
+  width: min(1400px, 160vw);
+  height: 120%;
+  transform: translateX(-50%);
+  background: conic-gradient(
+    from 180deg at 50% 0%,
+    transparent 160deg,
+    rgb(var(--beam) / 0.13) 172deg,
+    rgb(var(--beam) / 0.2) 180deg,
+    rgb(var(--beam) / 0.13) 188deg,
+    transparent 200deg
+  );
+  filter: blur(18px);
+  mask-image: linear-gradient(to bottom, #000 30%, transparent 95%);
+  animation: flicker 6s ease-in-out infinite;
+}
+
+@keyframes flicker {
+  0%, 100% { opacity: 0.85; }
+  8% { opacity: 0.7; }
+  10% { opacity: 0.95; }
+  45% { opacity: 0.8; }
+  47% { opacity: 1; }
+  70% { opacity: 0.88; }
+}
+
+.glow-orb {
+  position: absolute;
+  border-radius: 9999px;
+  filter: blur(90px);
+  pointer-events: none;
+  animation: drift 18s ease-in-out infinite alternate;
+}
+
+@keyframes drift {
+  from { transform: translate3d(0, 0, 0) scale(1); }
+  to { transform: translate3d(40px, -30px, 0) scale(1.12); }
+}
+
+/* Dust motes floating in the beam. */
+.mote {
+  position: absolute;
+  width: 2px;
+  height: 2px;
+  border-radius: 9999px;
+  background: var(--gold-2);
+  opacity: 0;
+  animation: mote linear infinite;
+}
+
+@keyframes mote {
+  0% { transform: translate(0, 0); opacity: 0; }
+  15% { opacity: 0.7; }
+  85% { opacity: 0.5; }
+  100% { transform: translate(var(--mx, 30px), -180px); opacity: 0; }
+}
+
+.gold-text {
+  background: linear-gradient(100deg, var(--gold-deep) 0%, var(--gold) 25%, var(--gold-2) 45%, var(--gold) 65%, var(--gold-deep) 100%);
+  background-size: 220% 100%;
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+  animation: sheen 7s ease-in-out infinite;
+}
+
+:root[data-theme="light"] .gold-text {
+  background-image: linear-gradient(100deg, #6e4a0c 0%, #a8741c 25%, #c9922f 45%, #a8741c 65%, #6e4a0c 100%);
+}
+
+@keyframes sheen {
+  0%, 100% { background-position: 100% 0; }
+  50% { background-position: 0% 0; }
+}
+
+/* Sprocket holes, like a film strip edge. */
+.sprockets {
+  height: 14px;
+  background-image: radial-gradient(circle at 50% 50%, rgb(var(--tint) / 0.12) 0 3.5px, transparent 4px);
+  background-size: 22px 14px;
+  background-repeat: repeat-x;
+}
+
+/* ---------- Motion primitives ---------- */
+
+.line-up {
+  display: inline-block;
+  animation: line-up 1.1s cubic-bezier(0.2, 0.7, 0.1, 1) both;
+  animation-delay: var(--d, 0ms);
+}
+
+@keyframes line-up {
+  from { transform: translateY(105%); opacity: 0; filter: blur(8px); }
+  to { transform: translateY(0); opacity: 1; filter: blur(0); }
+}
+
+.fade-in {
+  animation: fade-in 1.2s ease both;
+  animation-delay: var(--d, 0ms);
+}
+
+@keyframes fade-in {
+  from { opacity: 0; transform: translateY(12px); }
+  to { opacity: 1; transform: none; }
+}
+
+/* Scroll reveal: hidden only when scripting runs, so the page reads without JS. */
+@media (scripting: enabled) {
+  [data-reveal] {
+    opacity: 0;
+    transform: translateY(28px);
+    filter: blur(6px);
+    transition:
+      opacity 0.9s ease,
+      transform 1s cubic-bezier(0.2, 0.7, 0.1, 1),
+      filter 0.9s ease;
+    transition-delay: var(--d, 0ms);
+  }
+  [data-reveal][data-in] {
+    opacity: 1;
+    transform: none;
+    filter: none;
+  }
+}
+
+/* Cursor spotlight on cards: Effects sets --sx/--sy on [data-spot]. */
+[data-spot] {
+  position: relative;
+  isolation: isolate;
+}
+[data-spot]::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  z-index: -1;
+  border-radius: inherit;
+  opacity: 0;
+  transition: opacity 0.4s ease;
+  background: radial-gradient(420px circle at var(--sx, 50%) var(--sy, 50%), rgb(232 182 90 / 0.1), transparent 45%);
+}
+[data-spot]:hover::before {
+  opacity: 1;
+}
+
+.card {
+  border: 1px solid var(--line);
+  background: linear-gradient(180deg, var(--card-a), var(--card-b));
+  box-shadow: var(--card-shadow);
+  border-radius: 20px;
+  transition: border-color 0.4s ease, transform 0.5s cubic-bezier(0.2, 0.7, 0.1, 1);
+}
+.card:hover {
+  border-color: var(--line-2);
+}
+
+.marquee {
+  display: flex;
+  width: max-content;
+  animation: marquee 48s linear infinite;
+}
+.marquee-wrap:hover .marquee {
+  animation-play-state: paused;
+}
+
+@keyframes marquee {
+  to { transform: translateX(-50%); }
+}
+
+.bar-fill {
+  transform-origin: left center;
+  transition: transform 1.3s cubic-bezier(0.2, 0.7, 0.1, 1), opacity 0.4s ease;
+  transition-delay: var(--d, 0ms);
+}
+@media (scripting: enabled) {
+  .bar-fill { transform: scaleX(0); }
+  [data-in] .bar-fill { transform: scaleX(1); }
+  .donut-seg { stroke-dashoffset: var(--len); }
+  [data-in] .donut-seg { stroke-dashoffset: 0; }
+  .timeline-line { transform: scaleY(0); }
+  [data-in].timeline-line { transform: scaleY(1); }
+}
+
+.donut-seg {
+  transition:
+    stroke-dashoffset 1.6s cubic-bezier(0.2, 0.7, 0.1, 1),
+    opacity 0.4s ease,
+    stroke-width 0.4s ease;
+  transition-delay: var(--d, 0ms);
+}
+
+.timeline-line {
+  transform-origin: top;
+  transition: transform 1.8s cubic-bezier(0.2, 0.7, 0.1, 1) 0.3s;
+}
+
+.expand {
+  display: grid;
+  grid-template-rows: 0fr;
+  transition: grid-template-rows 0.5s cubic-bezier(0.2, 0.7, 0.1, 1);
+}
+.expand[data-open] {
+  grid-template-rows: 1fr;
+}
+.expand > div {
+  overflow: hidden;
+}
+
+@keyframes scrollcue {
+  0% { transform: translateY(-100%); }
+  100% { transform: translateY(200%); }
+}
+
+.pulse-dot {
+  animation: pulse 2.2s ease-in-out infinite;
+}
+@keyframes pulse {
+  0%, 100% { box-shadow: 0 0 0 0 color-mix(in srgb, var(--gold) 55%, transparent); }
+  50% { box-shadow: 0 0 0 7px transparent; }
+}
+
+:focus-visible {
+  outline: 2px solid var(--gold);
+  outline-offset: 3px;
+}
+
+/* ---------- Task drawer & toast ---------- */
+
+dialog.drawer[open] {
+  animation: drawer-in 0.5s cubic-bezier(0.2, 0.7, 0.1, 1);
+}
+dialog.drawer::backdrop {
+  background: rgb(0 0 0 / 0.45);
+  backdrop-filter: blur(4px);
+  animation: fade 0.4s ease;
+}
+@keyframes drawer-in {
+  from { transform: translateX(40px); opacity: 0; }
+  to { transform: none; opacity: 1; }
+}
+@keyframes fade {
+  from { opacity: 0; }
+}
+.toast-in {
+  animation: toast-in 0.45s cubic-bezier(0.2, 0.7, 0.1, 1);
+}
+@keyframes toast-in {
+  from { transform: translateY(16px) scale(0.96); opacity: 0; }
+}
+input[type="date"]::-webkit-calendar-picker-indicator {
+  opacity: 0.6;
+  cursor: pointer;
+}
+:root[data-theme="dark"] input[type="date"]::-webkit-calendar-picker-indicator {
+  filter: invert(1);
+}
+
+/* Theme switch: a circular reveal from the toggle (View Transitions), with a
+   colour cross-fade fallback where that API is missing. */
+::view-transition-old(root),
+::view-transition-new(root) {
+  animation: none;
+  mix-blend-mode: normal;
+}
+html.theme-fade,
+html.theme-fade *,
+html.theme-fade *::before {
+  transition:
+    background-color 0.45s ease,
+    color 0.45s ease,
+    border-color 0.45s ease,
+    fill 0.45s ease !important;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    transition-delay: 0ms !important;
+    scroll-behavior: auto !important;
+  }
+  .grain,
+  .mote {
+    display: none;
+  }
 }
