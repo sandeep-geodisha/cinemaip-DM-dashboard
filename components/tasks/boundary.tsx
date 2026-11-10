@@ -3,7 +3,7 @@
 import { Component, type ReactNode } from "react";
 
 /** Keeps a rendering error in the task board from blanking the page. Data on the server is untouched. */
-export class BoardBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+export class BoardBoundary extends Component<{ children: ReactNode; id: string }, { error: Error | null }> {
   state = { error: null as Error | null };
 
   static getDerivedStateFromError(error: Error) {
@@ -17,9 +17,9 @@ export class BoardBoundary extends Component<{ children: ReactNode }, { error: E
   render() {
     if (!this.state.error) return this.props.children;
     return (
-      <section id="board" className="scroll-mt-24">
+      <section id={this.props.id} className="scroll-mt-24">
         <div role="alert" className="rounded-2xl border border-st-blocked/50 bg-st-blocked/[0.08] px-6 py-5">
-          <p className="font-medium">The task board hit a problem and couldn&apos;t be shown.</p>
+          <p className="font-medium">This section hit a problem and couldn&apos;t be shown.</p>
           <p className="mt-1 text-sm text-muted">Nothing was lost; the board is saved on the server. Reloading usually fixes it.</p>
           <button
             onClick={() => location.reload()}

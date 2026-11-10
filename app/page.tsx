@@ -4,6 +4,8 @@ import { Nav } from "@/components/nav";
 import { SectionHead } from "@/components/section-head";
 import { TaskBoard } from "@/components/tasks/board";
 import { BoardBoundary } from "@/components/tasks/boundary";
+import { TeamSection } from "@/components/tasks/team";
+import { MeWidget } from "@/components/tasks/me";
 import { TasksProvider } from "@/components/tasks/provider";
 import { LiveStatus, OwnerChip } from "@/components/tasks/ui";
 import { decisionTaskId } from "@/lib/tasks";
@@ -250,7 +252,11 @@ export default function Home() {
             </div>
           </section>
 
-          <BoardBoundary>
+          <BoardBoundary id="team">
+            <TeamSection />
+          </BoardBoundary>
+
+          <BoardBoundary id="board">
             <TaskBoard />
           </BoardBoundary>
 
@@ -261,7 +267,7 @@ export default function Home() {
           {/* ================= CRITICS ================= */}
           <section id="critics" className="scroll-mt-24">
             <SectionHead
-              n="05"
+              n="06"
               kicker="Critic economics"
               title={
                 <>
@@ -360,7 +366,7 @@ export default function Home() {
           {/* ================= DECISIONS ================= */}
           <section id="decisions" className="scroll-mt-24">
             <SectionHead
-              n="06"
+              n="07"
               kicker="Before we roll"
               title={
                 <>
@@ -435,6 +441,7 @@ export default function Home() {
         </footer>
       </main>
       </PillarProvider>
+      <MeWidget />
       </TasksProvider>
     </>
   );

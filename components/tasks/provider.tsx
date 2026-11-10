@@ -52,6 +52,11 @@ type Ctx = {
   importMembers: (json: unknown) => Promise<ImportResult | null>;
   openTask: (id: string) => void;
   openNew: () => void;
+  /** Board owner filter: "" everyone, "none" unassigned, or a member id. */
+  ownerFilter: string;
+  setOwnerFilter: (v: string) => void;
+  /** Filters the board to one person (or "none") and scrolls to it. */
+  showTasksFor: (v: string) => void;
   notify: (msg: string, tone?: "ok" | "error", action?: ToastAction) => void;
 };
 
@@ -100,6 +105,7 @@ const writeActor = (id: string | null) => {
 export function TasksProvider({ children }: { children: ReactNode }) {
   const [data, setData] = useState<BoardResponse | null>(null);
   const [editing, setEditing] = useState<Editing>(null);
+  const [ownerFilter, setOwnerFilter] = useState("");
   const [toast, setToast] = useState<{ msg: string; tone: "ok" | "error"; key: number; action?: ToastAction } | null>(null);
   const pending = useRef(0);
   const etag = useRef<string | null>(null);
@@ -301,15 +307,21 @@ export function TasksProvider({ children }: { children: ReactNode }) {
       importMembers: async (json) => (await call("/api/members/import", { method: "POST", body: JSON.stringify(json) }))?.result ?? null,
       openTask: (id) => setEditing({ mode: "edit", id }),
       openNew: () => setEditing({ mode: "new" }),
+      ownerFilter: ok && (ownerFilter === "" || ownerFilter === "none" || memberById.has(ownerFilter)) ? ownerFilter : "",
+      setOwnerFilter,
+      showTasksFor: (v) => {
+        setOwnerFilter(v);
+        requestAnimationFrame(() => document.getElementById("board")?.scrollIntoView({ behavior: "smooth", block: "start" }));
+      },
       notify,
     };
-  }, [data, actorId, call, update, notify, remove, restore]);
+  }, [data, actorId, call, update, notify, remove, restore, ownerFilter]);
 
   return (
     <TasksContext.Provider value={value}>
       {children}
       <TaskEditor editing={editing} onClose={() => setEditing(null)} />
-      <div aria-live="polite" className="pointer-events-none fixed inset-x-0 bottom-6 z-[70] flex justify-center px-4">
+      <div aria-live="polite" className="pointer-events-none fixed inset-x-0 bottom-24 z-[70] flex justify-center px-4 sm:bottom-6">
         {toast && (
           <div
             key={toast.key}

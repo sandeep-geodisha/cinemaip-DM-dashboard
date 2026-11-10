@@ -4,6 +4,7 @@ import { useEffect, useState, useSyncExternalStore, type MouseEvent } from "reac
 
 const LINKS = [
   { id: "targets", label: "Targets" },
+  { id: "team", label: "Team" },
   { id: "board", label: "Tasks" },
   { id: "acts", label: "Calendar" },
   { id: "slate", label: "Initiatives" },

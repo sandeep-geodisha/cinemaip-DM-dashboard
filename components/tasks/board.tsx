@@ -1,24 +1,22 @@
 "use client";
 
-import { useEffect, useMemo, useRef, useState, type DragEvent, type ReactNode } from "react";
+import { useMemo, useState, type DragEvent, type ReactNode } from "react";
 import { pillarColor } from "@/lib/plan";
 import {
   KINDS,
   KIND_LABEL,
   KIND_PLURAL,
-  LIMITS,
   PRIORITIES,
   STATUSES,
   STATUS_LABEL,
   isOverdue,
   todayISO,
   type Kind,
-  type Member,
   type Status,
   type Task,
 } from "@/lib/tasks";
 import { SectionHead } from "@/components/section-head";
-import { useTasks, type ImportResult } from "@/components/tasks/provider";
+import { useTasks } from "@/components/tasks/provider";
 import { Avatar, OwnerChip, PriorityPill, StatusIcon, formatDue, statusColor } from "@/components/tasks/ui";
 import { PencilIcon, TrashIcon } from "@/components/tasks/editor";
 
@@ -37,11 +35,10 @@ function sortTasks(tasks: Task[]) {
 }
 
 export function TaskBoard() {
-  const { loaded, tasks, members, openNew, removedTasks, fileError, activity, storage } = useTasks();
+  const { loaded, tasks, members, memberById, openNew, removedTasks, fileError, activity, storage, ownerFilter: owner, setOwnerFilter: setOwner, actor } = useTasks();
   const [showRemoved, setShowRemoved] = useState(false);
   const [showActivity, setShowActivity] = useState(false);
   const [kind, setKind] = useState<Kind | "">("");
-  const [owner, setOwner] = useState<string>(""); // "" all, "none" unassigned, or member id
   const [query, setQuery] = useState("");
   const [view, setView] = useState<"board" | "list">("board");
 
@@ -60,7 +57,7 @@ export function TaskBoard() {
   return (
     <section id="board" className="scroll-mt-24">
       <SectionHead
-        n="02"
+        n="03"
         kicker="Task board"
         title={
           <>
@@ -88,9 +85,8 @@ export function TaskBoard() {
         </div>
       )}
 
-      <div className="mt-12 grid gap-5 lg:grid-cols-[minmax(0,1.25fr)_minmax(0,1fr)]">
+      <div className="mt-12">
         <Progress />
-        <Team owner={owner} onPick={(id) => setOwner(owner === id ? "" : id)} />
       </div>
 
       {/* Toolbar */}
@@ -129,6 +125,19 @@ export function TaskBoard() {
               className="w-44 rounded-full border border-line bg-panel py-1.5 pr-3 pl-8 text-sm placeholder:text-faint focus:border-gold/60 focus:outline-none"
             />
           </label>
+          {actor && (
+            <button
+              onClick={() => setOwner(owner === actor.id ? "" : actor.id)}
+              aria-pressed={owner === actor.id}
+              className={`inline-flex items-center gap-1.5 rounded-full border py-1 pr-3 pl-1 text-sm transition ${
+                owner === actor.id ? "border-gold/60 bg-gold/10 text-fg" : "border-line bg-panel text-muted hover:border-line-2 hover:text-fg"
+              }`}
+            >
+              <Avatar member={actor} size={22} />
+              My tasks
+              <span className="tabular text-xs text-faint">{tasks.filter((t) => t.assigneeId === actor.id).length}</span>
+            </button>
+          )}
           <label className="sr-only" htmlFor="owner-filter">
             Owner
           </label>
@@ -206,7 +215,22 @@ export function TaskBoard() {
       )}
 
       {(kind || owner || query) && loaded && (
-        <p className="mt-3 text-sm text-muted">
+        <p className="mt-3 flex flex-wrap items-center gap-x-2 text-sm text-muted">
+          {owner && (
+            <span className="inline-flex items-center gap-2 rounded-full border border-gold/40 bg-gold/10 py-0.5 pr-1 pl-1 text-fg">
+              {owner === "none" ? (
+                <span className="pl-2">Unassigned tasks</span>
+              ) : memberById.get(owner) ? (
+                <>
+                  <Avatar member={memberById.get(owner)!} size={20} />
+                  {memberById.get(owner)!.name}&apos;s tasks
+                </>
+              ) : null}
+              <button onClick={() => setOwner("")} aria-label="Show everyone's tasks" className="grid size-5 place-items-center rounded-full text-muted hover:bg-panel-2 hover:text-fg">
+                ✕
+              </button>
+            </span>
+          )}
           Showing {filtered.length} of {tasks.length} tasks ·{" "}
           <button
             className="text-gold-ink underline-offset-2 hover:underline"
@@ -250,7 +274,8 @@ function Progress() {
   const overdue = tasks.filter((t) => isOverdue(t, today)).length;
 
   return (
-    <div data-reveal data-spot className="card p-6 sm:p-7">
+    <div data-reveal data-spot className="card grid gap-6 p-6 sm:p-7 lg:grid-cols-[minmax(0,1.3fr)_minmax(0,1fr)] lg:items-center lg:gap-10">
+      <div>
       <div className="flex items-end justify-between gap-4">
         <div>
           <p className="text-xs tracking-wider text-muted uppercase">Plan progress</p>
@@ -288,7 +313,9 @@ function Progress() {
         ))}
       </ul>
 
-      <div className="mt-6 grid grid-cols-2 gap-3 sm:grid-cols-4">
+      </div>
+
+      <div className="grid grid-cols-2 gap-3">
         {(["in_progress", "blocked"] as Status[]).map((s) => (
           <Stat key={s} label={STATUS_LABEL[s]} value={loaded ? counts[s] : null} icon={<span style={{ color: statusColor(s) }}><StatusIcon status={s} /></span>} />
         ))}
@@ -308,310 +335,6 @@ function Stat({ label, value, icon, warn, danger }: { label: string; value: numb
       </p>
       <p className={`tabular mt-1 font-display text-2xl ${warn ? (danger ? "text-st-blocked" : "text-gold-ink") : ""}`}>{value ?? "–"}</p>
     </div>
-  );
-}
-
-/* ---------------- team ---------------- */
-
-function Team({ owner, onPick }: { owner: string; onPick: (id: string) => void }) {
-  const { loaded, members, tasks, addMember, notify, actor, setActor, importMembers } = useTasks();
-  const fileRef = useRef<HTMLInputElement>(null);
-  const [importReport, setImportReport] = useState<ImportResult | null>(null);
-
-  const onImport = async (file: File | undefined) => {
-    if (!file) return;
-    let json: unknown;
-    try {
-      json = JSON.parse(await file.text());
-    } catch {
-      notify(`${file.name} isn't valid JSON`, "error");
-      return;
-    }
-    const r = await importMembers(json);
-    if (r) {
-      setImportReport(r);
-      notify(`Imported ${file.name}: ${r.added} added, ${r.updated} updated, ${r.skipped.length} skipped`);
-    }
-  };
-  const [name, setName] = useState("");
-  const [role, setRole] = useState("");
-  const [email, setEmail] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  const add = async () => {
-    if (!name.trim()) return;
-    setBusy(true);
-    const m = await addMember({ name, role, email });
-    setBusy(false);
-    if (m) {
-      notify(`${m.name} added to the team`);
-      setName("");
-      setRole("");
-      setEmail("");
-    }
-  };
-
-  const load = (m: Member) => {
-    const mine = tasks.filter((t) => t.assigneeId === m.id);
-    return { open: mine.filter((t) => t.status !== "done").length, done: mine.filter((t) => t.status === "done").length };
-  };
-
-  const field =
-    "min-w-0 rounded-lg border border-line bg-panel px-3 py-2 text-sm placeholder:text-faint focus:border-gold/60 focus:outline-none";
-
-  return (
-    <div data-reveal data-spot className="card flex flex-col p-6 sm:p-7" style={{ ["--d" as string]: "120ms" }}>
-      <div className="flex flex-wrap items-center justify-between gap-2">
-        <h3 className="font-medium">
-          Team <span className="tabular ml-1 text-xs font-normal text-muted">{loaded ? members.length : "…"}</span>
-        </h3>
-        <div className="flex items-center gap-1.5">
-          <input ref={fileRef} type="file" accept="application/json,.json" className="hidden" onChange={(e) => { onImport(e.target.files?.[0]); e.target.value = ""; }} />
-          <button
-            onClick={() => fileRef.current?.click()}
-            title='Add people from a JSON file: [{"name": "...", "role": "...", "email": "..."}]'
-            className="rounded-full border border-line px-3 py-1 text-xs text-muted transition hover:border-gold/60 hover:text-fg"
-          >
-            Import JSON
-          </button>
-          <a
-            href="/api/export"
-            title="Download the whole board file: team, tasks and history"
-            className="rounded-full border border-line px-3 py-1 text-xs text-muted transition hover:border-gold/60 hover:text-fg"
-          >
-            Export
-          </a>
-        </div>
-      </div>
-
-      {loaded && members.length > 0 && (
-        <label className="mt-3 flex items-center gap-2 rounded-xl border border-line bg-panel px-3 py-2 text-xs text-muted">
-          <span className="shrink-0">You are</span>
-          <select
-            value={actor?.id ?? ""}
-            onChange={(e) => setActor(e.target.value || null)}
-            className="min-w-0 flex-1 bg-transparent text-sm text-fg focus:outline-none"
-          >
-            <option value="">Choose your name, so changes show who made them</option>
-            {members.map((m) => (
-              <option key={m.id} value={m.id}>
-                {m.name}
-              </option>
-            ))}
-          </select>
-          {actor && <Avatar member={actor} size={22} />}
-        </label>
-      )}
-
-      {importReport && (
-        <div className="toast-in mt-3 rounded-xl border border-line bg-panel px-3.5 py-3 text-xs">
-          <div className="flex items-center justify-between">
-            <span className="text-fg">
-              Import: {importReport.added} added · {importReport.updated} updated · {importReport.skipped.length} skipped
-            </span>
-            <button onClick={() => setImportReport(null)} className="text-muted hover:text-fg" aria-label="Dismiss">
-              ✕
-            </button>
-          </div>
-          {importReport.skipped.length > 0 && (
-            <ul className="mt-1.5 max-h-24 space-y-0.5 overflow-y-auto text-muted">
-              {importReport.skipped.map((s, i) => (
-                <li key={i}>
-                  {s.entry}: {s.reason}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      )}
-
-      <ul className="mt-4 flex max-h-80 flex-col gap-1 overflow-y-auto pr-1">
-        {loaded && members.length === 0 && (
-          <li className="rounded-xl border border-dashed border-line-2 px-4 py-5 text-center text-sm text-muted">
-            Add the people who will own this plan, or import them from a JSON file. You can then assign any task to them.
-          </li>
-        )}
-        {members.map((m) => (
-          <MemberRow key={m.id} member={m} load={load(m)} selected={owner === m.id} onPick={() => onPick(m.id)} />
-        ))}
-      </ul>
-
-      <form
-        className="mt-auto grid grid-cols-2 gap-2 border-t border-line pt-4"
-        onSubmit={(e) => {
-          e.preventDefault();
-          add();
-        }}
-      >
-        <input value={name} onChange={(e) => setName(e.target.value)} placeholder="Name" maxLength={LIMITS.name} aria-label="Name" className={field} required />
-        <input value={role} onChange={(e) => setRole(e.target.value)} placeholder="Role" maxLength={LIMITS.role} aria-label="Role" className={field} />
-        <input
-          type="email"
-          value={email}
-          onChange={(e) => setEmail(e.target.value)}
-          placeholder="Email (optional)"
-          maxLength={LIMITS.email}
-          aria-label="Email"
-          className={field}
-        />
-        <button
-          type="submit"
-          disabled={busy || !name.trim()}
-          className="rounded-lg bg-gold px-4 py-2 text-sm font-medium text-black transition hover:bg-gold-2 disabled:bg-panel-2 disabled:text-faint"
-        >
-          Add to team
-        </button>
-      </form>
-    </div>
-  );
-}
-
-const memberField =
-  "min-w-0 rounded-lg border border-line bg-panel px-3 py-2 text-sm placeholder:text-faint focus:border-gold/60 focus:outline-none";
-
-/** One team member: view, inline edit, or confirm removal. */
-function MemberRow({
-  member: m,
-  load,
-  selected,
-  onPick,
-}: {
-  member: Member;
-  load: { open: number; done: number };
-  selected: boolean;
-  onPick: () => void;
-}) {
-  const { updateMember, removeMember, notify } = useTasks();
-  const [mode, setMode] = useState<"view" | "edit" | "confirm">("view");
-  const [name, setName] = useState(m.name);
-  const [role, setRole] = useState(m.role);
-  const [email, setEmail] = useState(m.email);
-  const [busy, setBusy] = useState(false);
-  const rowRef = useRef<HTMLLIElement>(null);
-  const assigned = load.open + load.done;
-
-  // Keep the edit form and confirm prompt fully visible inside the scrolling list.
-  useEffect(() => {
-    if (mode !== "view") rowRef.current?.scrollIntoView({ block: "nearest", behavior: "smooth" });
-  }, [mode]);
-
-  const startEdit = () => {
-    setName(m.name);
-    setRole(m.role);
-    setEmail(m.email);
-    setMode("edit");
-  };
-
-  const save = async () => {
-    if (!name.trim()) return;
-    const patch: { name?: string; role?: string; email?: string } = {};
-    if (name.trim() !== m.name) patch.name = name;
-    if (role.trim() !== m.role) patch.role = role;
-    if (email.trim() !== m.email) patch.email = email;
-    if (!Object.keys(patch).length) return setMode("view");
-    setBusy(true);
-    const ok = await updateMember(m.id, patch);
-    setBusy(false);
-    if (ok) {
-      notify(`${name.trim()} updated`);
-      setMode("view");
-    }
-  };
-
-  const remove = async () => {
-    setBusy(true);
-    const ok = await removeMember(m.id);
-    setBusy(false);
-    if (ok) notify(assigned ? `${m.name} removed. Their ${assigned} task${assigned === 1 ? " is" : "s are"} now unassigned.` : `${m.name} removed`);
-    else setMode("view");
-  };
-
-  if (mode === "edit") {
-    return (
-      <li ref={rowRef} className="rounded-xl border border-gold/40 bg-gold/[0.06] p-3">
-        <form
-          className="grid grid-cols-2 gap-2"
-          onSubmit={(e) => {
-            e.preventDefault();
-            save();
-          }}
-          onKeyDown={(e) => e.key === "Escape" && (e.stopPropagation(), setMode("view"))}
-        >
-          <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="Name" aria-label="Name" maxLength={LIMITS.name} required className={memberField} />
-          <input value={role} onChange={(e) => setRole(e.target.value)} placeholder="Role" aria-label="Role" maxLength={LIMITS.role} className={memberField} />
-          <input type="email" value={email} onChange={(e) => setEmail(e.target.value)} placeholder="Email (optional)" aria-label="Email" maxLength={LIMITS.email} className={`${memberField} col-span-2`} />
-          <div className="col-span-2 flex justify-end gap-2">
-            <button type="button" onClick={() => setMode("view")} className="rounded-lg px-3 py-1.5 text-sm text-muted hover:text-fg">
-              Cancel
-            </button>
-            <button type="submit" disabled={busy || !name.trim()} className="rounded-lg bg-gold px-4 py-1.5 text-sm font-medium text-black transition hover:bg-gold-2 disabled:opacity-50">
-              Save
-            </button>
-          </div>
-        </form>
-      </li>
-    );
-  }
-
-  if (mode === "confirm") {
-    return (
-      <li ref={rowRef} className="flex flex-wrap items-center gap-3 rounded-xl border border-st-blocked/40 bg-st-blocked/[0.07] px-3 py-2.5">
-        <Avatar member={m} size={32} />
-        <p className="min-w-0 flex-1 text-sm">
-          Remove <span className="font-medium">{m.name}</span>?
-          <span className="block text-xs text-muted">
-            {assigned ? `Their ${assigned} task${assigned === 1 ? "" : "s"} will become unassigned.` : "They have no tasks assigned."}
-          </span>
-        </p>
-        <span className="flex shrink-0 items-center gap-1.5">
-          <button onClick={() => setMode("view")} className="rounded-full px-3 py-1.5 text-xs text-muted hover:text-fg">
-            Keep
-          </button>
-          <button onClick={remove} disabled={busy} className="rounded-full bg-st-blocked px-3.5 py-1.5 text-xs font-medium text-white disabled:opacity-60">
-            Remove
-          </button>
-        </span>
-      </li>
-    );
-  }
-
-  return (
-    <li className={`group flex items-center gap-2 rounded-xl px-2 py-1.5 transition ${selected ? "bg-gold/10 ring-1 ring-gold/40" : "hover:bg-panel-2"}`}>
-      <button onClick={onPick} className="flex min-w-0 flex-1 items-center gap-3 text-left" aria-pressed={selected} title={`Show ${m.name}'s tasks`}>
-        <Avatar member={m} size={32} />
-        <span className="min-w-0 flex-1">
-          <span className="block truncate text-sm">{m.name}</span>
-          <span className="block truncate text-xs text-faint">{[m.role, m.email].filter(Boolean).join(" · ") || "No role set"}</span>
-        </span>
-        <span className="tabular shrink-0 text-right text-xs text-muted">
-          {load.open} open
-          {load.done > 0 && <span className="block text-faint">{load.done} done</span>}
-        </span>
-      </button>
-      <span className="flex shrink-0 items-center gap-0.5 opacity-70 transition group-hover:opacity-100 focus-within:opacity-100">
-        <button
-          onClick={startEdit}
-          aria-label={`Edit ${m.name}`}
-          title="Edit"
-          className="grid size-8 place-items-center rounded-full text-muted transition hover:bg-panel-2 hover:text-gold-ink"
-        >
-          <svg viewBox="0 0 16 16" className="size-3.5" aria-hidden fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round">
-            <path d="M10.8 2.7l2.5 2.5L5.6 12.9 2.5 13.5l.6-3.1z" />
-            <path d="M9.4 4.1l2.5 2.5" />
-          </svg>
-        </button>
-        <button
-          onClick={() => setMode("confirm")}
-          aria-label={`Remove ${m.name}`}
-          title="Remove"
-          className="grid size-8 place-items-center rounded-full text-muted transition hover:bg-st-blocked/10 hover:text-st-blocked"
-        >
-          <svg viewBox="0 0 16 16" className="size-3.5" aria-hidden fill="none" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round">
-            <path d="M2.5 4.5h11M6.5 4.5V3h3v1.5M4 4.5l.7 9h6.6l.7-9M6.8 7v4M9.2 7v4" />
-          </svg>
-        </button>
-      </span>
-    </li>
   );
 }
 

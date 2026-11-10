@@ -45,7 +45,7 @@ export function BudgetSection() {
   return (
     <section id="budget" className="relative scroll-mt-24">
       <SectionHead
-        n="07"
+        n="08"
         kicker="The budget"
         title={
           <>
@@ -88,7 +88,7 @@ export function ActsSection() {
   return (
     <section id="acts" className="relative scroll-mt-24">
       <SectionHead
-        n="03"
+        n="04"
         kicker="The calendar"
         title={
           <>
@@ -108,7 +108,7 @@ export function SlateSection() {
   return (
     <section id="slate" className="relative scroll-mt-24">
       <SectionHead
-        n="04"
+        n="05"
         kicker="The slate"
         title={
           <>

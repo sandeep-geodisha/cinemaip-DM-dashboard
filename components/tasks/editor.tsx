@@ -537,7 +537,7 @@ function EditTask({ task, onClose }: { task: Task; onClose: () => void }) {
       <div className="sticky bottom-0 flex flex-wrap items-center justify-between gap-3 border-t border-line bg-bg/90 px-6 py-4 backdrop-blur-xl">
         <span className="text-xs text-faint">
           {task.updatedBy ? `Updated ${timeAgo(task.updatedAt)} by ${task.updatedBy}` : `Added ${timeAgo(task.createdAt)}`}
-          {!actor && <span className="block text-gold-ink">Tip: pick who you are in the Team panel so changes show your name.</span>}
+          {!actor && <span className="block text-gold-ink">Tip: choose your name under “You are” in the Team section so changes show who made them.</span>}
         </span>
         <div className="flex items-center gap-2">
           <button
