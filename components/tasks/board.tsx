@@ -19,6 +19,7 @@ import { SectionHead } from "@/components/section-head";
 import { useTasks } from "@/components/tasks/provider";
 import { AssignMenu, Avatar, OwnerChip, PriorityPill, StatusIcon, formatDue, statusColor } from "@/components/tasks/ui";
 import { PencilIcon, TrashIcon } from "@/components/tasks/editor";
+import { deleteTaskQuestion } from "@/components/tasks/confirm";
 
 const PRIORITY_RANK = Object.fromEntries(PRIORITIES.map((p, i) => [p, i]));
 
@@ -398,8 +399,7 @@ function ActivityPanel() {
 /* ---------------- removed tasks ---------------- */
 
 function RemovedPanel() {
-  const { removedTasks, restore, deleteForever, notify } = useTasks();
-  const [confirm, setConfirm] = useState<string | null>(null);
+  const { removedTasks, restore, deleteForever, notify, confirm } = useTasks();
   return (
     <ul className="toast-in flex w-full flex-col divide-y divide-line overflow-hidden rounded-2xl border border-line bg-panel">
       <li className="px-4 py-2.5 text-[11px] font-medium tracking-[0.16em] text-muted uppercase">Removed tasks</li>
@@ -411,24 +411,7 @@ function RemovedPanel() {
               {KIND_LABEL[t.type]} · {t.context}
             </span>
           </span>
-          {confirm === t.id ? (
-            <span className="flex items-center gap-1.5 text-xs">
-              <span className="text-muted">Delete for good?</span>
-              <button onClick={() => setConfirm(null)} className="rounded-full px-2.5 py-1 text-muted hover:text-fg">
-                Cancel
-              </button>
-              <button
-                onClick={async () => {
-                  if (await deleteForever(t.id)) notify("Task deleted permanently");
-                  setConfirm(null);
-                }}
-                className="rounded-full bg-st-blocked px-3 py-1 font-medium text-white"
-              >
-                Delete forever
-              </button>
-            </span>
-          ) : (
-            <span className="flex items-center gap-1.5">
+          <span className="flex items-center gap-1.5">
               <button
                 onClick={async () => (await restore(t.id)) && notify("Task restored")}
                 className="rounded-full border border-line-2 px-3 py-1 text-xs transition hover:border-gold/60 hover:text-gold-ink"
@@ -436,12 +419,26 @@ function RemovedPanel() {
                 Restore
               </button>
               {t.type === "custom" && (
-                <button onClick={() => setConfirm(t.id)} className="rounded-full px-3 py-1 text-xs text-st-blocked transition hover:bg-st-blocked/10">
+                <button
+                  onClick={async () => {
+                    const yes = await confirm({
+                      title: "Delete this task permanently?",
+                      message: (
+                        <>
+                          <span className="text-fg">“{t.title}”</span>{" "}
+                          will be deleted for good, with its owners, notes and history. This can&apos;t be undone.
+                        </>
+                      ),
+                      yes: "Yes, delete forever",
+                    });
+                    if (yes && (await deleteForever(t.id))) notify("Task deleted permanently");
+                  }}
+                  className="rounded-full px-3 py-1 text-xs text-st-blocked transition hover:bg-st-blocked/10"
+                >
                   Delete forever
                 </button>
               )}
-            </span>
-          )}
+          </span>
         </li>
       ))}
       <li className="px-4 py-2.5 text-xs text-faint">
@@ -509,7 +506,7 @@ function Kanban({ tasks }: { tasks: Task[] }) {
 
 /** Edit and delete buttons shown on task cards and list rows. */
 function TaskActions({ task: t }: { task: Task }) {
-  const { openTask, remove } = useTasks();
+  const { openTask, remove, confirm } = useTasks();
   return (
     <span className="flex items-center gap-0.5">
       <button
@@ -523,9 +520,9 @@ function TaskActions({ task: t }: { task: Task }) {
       </button>
       <button
         type="button"
-        onClick={() => remove(t.id)}
+        onClick={async () => (await confirm(deleteTaskQuestion(t))) && remove(t.id)}
         aria-label={`Delete ${t.title}`}
-        title="Delete (you can undo or restore)"
+        title="Delete"
         className="grid size-7 place-items-center rounded-full text-muted transition hover:bg-st-blocked/10 hover:text-st-blocked"
       >
         <TrashIcon />

@@ -240,10 +240,10 @@ export function planCatalogue(): PlanText[] {
     ...decisions.map((d) => ({
       id: decisionTaskId(d.topic),
       type: "decision" as const,
-      title: d.topic,
+      title: d.title,
       summary: d.question,
       description: decisionDescription(d.topic, d.question),
-      context: "Decision before launch",
+      context: `Before launch · ${d.topic}`,
       pillar: null,
     })),
     ...phases.flatMap((p) =>

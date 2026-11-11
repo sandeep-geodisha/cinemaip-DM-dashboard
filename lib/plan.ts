@@ -48,7 +48,8 @@ export type Phase = {
 
 export type PayoutRule = { item: string; rule: string; value: number; unit: "₹" | "pts" | "reviews" | "sign-ups" };
 
-export type Decision = { topic: string; question: string; status: "Open" | "Decided" };
+/** `topic` is the short name (and the task id); `title` is the task as an action. */
+export type Decision = { topic: string; title: string; question: string; status: "Open" | "Decided" };
 
 export const PILLARS: Pillar[] = ["Be found", "Be seen", "Build the community", "Contests and intelligence"];
 
@@ -123,7 +124,7 @@ const act = (a: PlanActivity) => a;
 
 export const phases: Phase[] = [
   { phase: 1, period: "Months 1–2", name: "Foundations", activities: [
-    act({ initiativeId: 1, activity: "Movie pages, schema markup and answer blocks live",
+    act({ initiativeId: 1, activity: "Launch search-ready movie pages with schema and answer blocks",
       summary: "Launch movie pages that rank for box office searches and get quoted by AI assistants.",
       steps: [
         "Build a server-rendered page for every current release: day-wise collections, reviews, cast and where to stream.",
@@ -136,7 +137,7 @@ export const phases: Phase[] = [
       measure: "Top 5 for \"[movie] box office collection\" within 7 days of release, on 70% of new releases; AI citations each week.",
       watch: "Pages must be readable without JavaScript. If GEO turns out to mean location search, city pages are added.",
       needs: ["GEO", "Team time"] }),
-    act({ initiativeId: 3, activity: "Channel database built",
+    act({ initiativeId: 3, activity: "Build a database of 600 entertainment channels",
       summary: "Map 600 entertainment pages and channels, and decide how to approach each one.",
       steps: [
         "List YouTube, Instagram, Facebook and X entertainment pages using official APIs and public data.",
@@ -148,7 +149,7 @@ export const phases: Phase[] = [
       measure: "600 channels mapped and tiered.",
       watch: "Official APIs and public data only; no scraping behind logins.",
       needs: ["Team time"] }),
-    act({ initiativeId: 2, activity: "Own-page bots and the approval queue",
+    act({ initiativeId: 2, activity: "Set up reply bots on our pages and a comment approval queue",
       summary: "Automate replies and DMs on our own pages, and queue comments for other pages for a person to approve.",
       steps: [
         "Connect CinemaIP's own Instagram, Facebook and X accounts through the official APIs.",
@@ -161,7 +162,7 @@ export const phases: Phase[] = [
       measure: "Link clicks and sign-ups per 100 comments, per platform.",
       watch: "Fully automatic link comments on other pages break Meta and X rules.",
       needs: ["Bots", "Team time"] }),
-    act({ initiativeId: 9, activity: "First batch of 25 critics onboarded",
+    act({ initiativeId: 9, activity: "Onboard the first 25 paid critics",
       summary: "Bring in the first 25 paid critics, with a guide, a review template and moderation in place.",
       steps: [
         "Publish the onboarding guide and the review template.",
@@ -175,7 +176,7 @@ export const phases: Phase[] = [
       budget: "Up to ₹25K of the ₹50K critics line (25 critics × ₹1,000 at most), paid only on result.",
       watch: "Hold the quality bar from the first review; points count only for approved reviews.",
       needs: ["Points"] }),
-    act({ initiativeId: 6, activity: "Weekly report email starts",
+    act({ initiativeId: 6, activity: "Launch the Monday box office email and release-day push",
       summary: "Send a box office report every Monday and a push on release days, on free-tier tools.",
       steps: [
         "Pick a free-tier email tool and web push service.",
@@ -187,7 +188,7 @@ export const phases: Phase[] = [
       doneWhen: "The first Monday report has gone out and release-day push is working.",
       measure: "Subscribers (8K by month 6), open and click rates, return visits within 7 days.",
       watch: "One-click unsubscribe and clear consent." }),
-    act({ initiativeId: 4, activity: "First QR placements in colleges and a few theatres",
+    act({ initiativeId: 4, activity: "Place tracked QR codes in colleges and theatres",
       summary: "Place tracked QR codes in colleges and a few theatres to learn which places bring sign-ups.",
       steps: [
         "Create a dynamic QR code for each placement that opens the current film's page.",
@@ -199,7 +200,7 @@ export const phases: Phase[] = [
       doneWhen: "Codes are live in the first colleges and theatres, with scans and sign-ups reported per placement.",
       measure: "Scans and sign-ups per placement; cost per sign-up.",
       watch: "Venue permission first, and a schedule for refreshing posters." }),
-    act({ initiativeId: 11, activity: "MiroFish pilot set up",
+    act({ initiativeId: 11, activity: "Run a MiroFish audience-reaction pilot",
       summary: "Set up the MiroFish simulation tool and test it once against a real release.",
       steps: [
         "Install MiroFish (an open-source agent simulation tool on GitHub) and add an LLM key.",
@@ -213,7 +214,7 @@ export const phases: Phase[] = [
       watch: "It simulates social conversation, not site load; keep synthetic users off the live site." }),
   ] },
   { phase: 2, period: "Months 3–4", name: "Contests and campuses", activities: [
-    act({ initiativeId: 7, activity: "Student ambassadors recruited",
+    act({ initiativeId: 7, activity: "Recruit 100 student ambassadors in 25 colleges",
       summary: "Recruit 100 student ambassadors across about 25 colleges, rewarded only for verified sign-ups.",
       steps: [
         "Open an application form and choose ambassadors college by college.",
@@ -225,7 +226,7 @@ export const phases: Phase[] = [
       doneWhen: "Ambassadors are active in about 25 colleges, each with a working referral code.",
       measure: "100 ambassadors, 25 colleges, 4K referred sign-ups.",
       watch: "Reward verified sign-ups only." }),
-    act({ initiativeId: 8, activity: "First Day 1 prediction contest on a major release",
+    act({ initiativeId: 8, activity: "Run the first Day 1 box office prediction contest",
       summary: "Run the first free prediction contest on a big release, with entries locked before the first show.",
       steps: [
         "Pick a major release.",
@@ -239,7 +240,7 @@ export const phases: Phase[] = [
       budget: "About ₹5K of the ₹15K prediction prizes line (three contests), paid only on result.",
       watch: "Free entry and clear rules; the cash prize needs the legal review first.",
       needs: ["Legal check", "Prize partners"] }),
-    act({ initiativeId: 10, activity: "Critic of the Month begins",
+    act({ initiativeId: 10, activity: "Launch the monthly Critic of the Month vote",
       summary: "Start a monthly public vote that features the best critic and pays the winner ₹2,000.",
       steps: [
         "Shortlist the top 5 critics each month on review quality.",
@@ -250,7 +251,7 @@ export const phases: Phase[] = [
       doneWhen: "The first month's winner is announced, featured and paid.",
       measure: "Votes cast, sign-ups from voters, referral traffic from the winner.",
       watch: "Shortlist on quality, not on the number of reviews." }),
-    act({ initiativeId: 12, activity: "Short film contest runs for one month",
+    act({ initiativeId: 12, activity: "Run a one-month short film contest",
       summary: "Run a one-month short film contest where likes and comments need a login.",
       steps: [
         "Publish the rules: older films are allowed with signed proof of ownership.",
@@ -264,7 +265,7 @@ export const phases: Phase[] = [
       measure: "50 submissions; sign-ups from login-only likes and comments.",
       watch: "Count unique logged-in viewers, not raw views.",
       needs: ["Legal check", "Prize partners"] }),
-    act({ initiativeId: 3, activity: "Channel partnerships by barter",
+    act({ initiativeId: 3, activity: "Start barter partnerships with the best-fit channels",
       summary: "Turn the best-fit channels from the database into partnerships, paid in barter rather than fees.",
       steps: [
         "Take the partnership tier from the channel database.",
@@ -277,7 +278,7 @@ export const phases: Phase[] = [
       watch: "No cash fees; official APIs and public data only." }),
   ] },
   { phase: 3, period: "Months 5–6", name: "Scale what worked", activities: [
-    act({ initiativeId: 9, activity: "Second batch of 25 critics, if first batch quality holds",
+    act({ initiativeId: 9, activity: "Onboard 25 more critics if the first batch's quality holds",
       summary: "Add 25 more critics only if the first batch's quality and cost per review held up.",
       steps: [
         "Review the first batch: approval rate, review quality and cost per approved review.",
@@ -288,7 +289,7 @@ export const phases: Phase[] = [
       measure: "50 activated critics; cost per approved review.",
       budget: "Up to ₹25K, the rest of the ₹50K critics line, paid only on result.",
       watch: "The cap stays at 50 critics." }),
-    act({ initiativeId: 4, activity: "More QR placements where scans convert",
+    act({ initiativeId: 4, activity: "Add QR codes only where scans turned into sign-ups",
       summary: "Add QR codes only in the kinds of places that brought sign-ups in Act I.",
       steps: [
         "Rank the Act I placements by sign-ups and cost per sign-up.",
@@ -298,7 +299,7 @@ export const phases: Phase[] = [
       doneWhen: "New codes are live only where scans converted, and the weak placements are gone.",
       measure: "Cost per sign-up compared with Act I.",
       watch: "Venue permission for every new placement." }),
-    act({ initiativeId: 8, activity: "Second and third prediction contests",
+    act({ initiativeId: 8, activity: "Run the second and third prediction contests",
       summary: "Run two more prediction contests, improved by what the first one taught us.",
       steps: [
         "Review the first contest: entries, new entrants and anything that went wrong.",
@@ -309,7 +310,7 @@ export const phases: Phase[] = [
       measure: "2,000 entries per contest; share of new entrants.",
       budget: "About ₹10K, the rest of the ₹15K prediction prizes line, paid only on result.",
       watch: "Keep the rules the legal review approved." }),
-    act({ initiativeId: 5, activity: "Review every channel by cost per sign-up and decide on metro",
+    act({ initiativeId: 5, activity: "Compare cost per sign-up by channel and decide on metro ads",
       summary: "Compare every channel's cost per sign-up and decide whether metro ads are worth a pilot.",
       steps: [
         "Pull sign-ups and cost per sign-up for search, bots, channels, QR, email, ambassadors, contests and critics.",
@@ -336,13 +337,13 @@ export const payouts: PayoutRule[] = [
 ];
 
 export const decisions: Decision[] = [
-  { topic: "Cash cap", question: "Is about ₹1.6L the right ceiling? Prizes are the easiest line to trim.", status: "Open" },
-  { topic: "Team time", question: "Who builds the movie pages, runs the bots and handles outreach?", status: "Open" },
-  { topic: "Prize partners", question: "A theatre or ticketing partner for tickets, and a sponsor for short film prizes.", status: "Open" },
-  { topic: "GEO", question: "Being cited by AI assistants, or location-based search? The second shifts the plan to city pages.", status: "Open" },
-  { topic: "Points", question: "Confirm 1 point = ₹1 for critic payouts.", status: "Open" },
-  { topic: "Bots", question: "Is the approval queue on other pages' comments acceptable under platform rules?", status: "Open" },
-  { topic: "Legal check", question: "Prediction and short film contests with cash prizes need review before launch.", status: "Open" },
+  { topic: "Cash cap", title: "Confirm the ₹1.6L cash budget", question: "Is about ₹1.6L the right ceiling? Prizes are the easiest line to trim.", status: "Open" },
+  { topic: "Team time", title: "Assign owners for movie pages, bots and outreach", question: "Who builds the movie pages, runs the bots and handles outreach?", status: "Open" },
+  { topic: "Prize partners", title: "Find a ticketing partner and a prize sponsor", question: "A theatre or ticketing partner for tickets, and a sponsor for short film prizes.", status: "Open" },
+  { topic: "GEO", title: "Decide what GEO means: AI citations or local search", question: "Being cited by AI assistants, or location-based search? The second shifts the plan to city pages.", status: "Open" },
+  { topic: "Points", title: "Confirm the critic points rate (1 point = ₹1)", question: "Confirm 1 point = ₹1 for critic payouts.", status: "Open" },
+  { topic: "Bots", title: "Check the bot comment queue against platform rules", question: "Is the approval queue on other pages' comments acceptable under platform rules?", status: "Open" },
+  { topic: "Legal check", title: "Get a legal review of the cash-prize contests", question: "Prediction and short film contests with cash prizes need review before launch.", status: "Open" },
 ];
 
 // ---- Derived figures. Everything below is worked out from the tables above,

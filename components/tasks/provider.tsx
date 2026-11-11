@@ -13,6 +13,7 @@ import {
 } from "react";
 import { isBoardResponse, planTextById, type ActivityEntry, type BoardResponse, type Member, type Task } from "@/lib/tasks";
 import { TaskEditor } from "@/components/tasks/editor";
+import { ConfirmDialog, type ConfirmRequest } from "@/components/tasks/confirm";
 
 export type Patch = Partial<Pick<Task, "assigneeIds" | "status" | "priority" | "due" | "notes" | "title" | "summary" | "description">> & {
   pillar?: string | null;
@@ -69,6 +70,8 @@ type Ctx = {
   /** Filters the board to one person (or "none") and scrolls to it. */
   showTasksFor: (v: string) => void;
   notify: (msg: string, tone?: "ok" | "error", action?: ToastAction) => void;
+  /** Asks "are you sure?" and resolves true only if the person clicks Yes. */
+  confirm: (r: ConfirmRequest) => Promise<boolean>;
 };
 
 const TasksContext = createContext<Ctx | null>(null);
@@ -125,6 +128,24 @@ export function TasksProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     actorRef.current = actorId;
   }, [actorId]);
+
+  const [asking, setAsking] = useState<ConfirmRequest | null>(null);
+  const answerRef = useRef<((yes: boolean) => void) | null>(null);
+  const confirm = useCallback(
+    (r: ConfirmRequest) =>
+      new Promise<boolean>((resolve) => {
+        answerRef.current?.(false); // a newer question replaces an unanswered one
+        answerRef.current = resolve;
+        setAsking(r);
+      }),
+    [],
+  );
+  const onAnswer = useCallback((yes: boolean) => {
+    const resolve = answerRef.current;
+    answerRef.current = null;
+    setAsking(null);
+    resolve?.(yes);
+  }, []);
 
   const notify = useCallback((msg: string, tone: "ok" | "error" = "ok", action?: ToastAction) => {
     setToast({ msg, tone, key: Date.now(), action });
@@ -334,13 +355,15 @@ export function TasksProvider({ children }: { children: ReactNode }) {
         requestAnimationFrame(() => document.getElementById("board")?.scrollIntoView({ behavior: "smooth", block: "start" }));
       },
       notify,
+      confirm,
     };
-  }, [data, actorId, call, update, notify, remove, restore, ownerFilter]);
+  }, [data, actorId, call, update, notify, remove, restore, ownerFilter, confirm]);
 
   return (
     <TasksContext.Provider value={value}>
       {children}
       <TaskEditor editing={editing} onClose={() => setEditing(null)} />
+      <ConfirmDialog request={asking} onAnswer={onAnswer} />
       <div aria-live="polite" className="pointer-events-none fixed inset-x-0 bottom-24 z-[70] flex justify-center px-4 sm:bottom-6">
         {toast && (
           <div

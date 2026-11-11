@@ -194,8 +194,8 @@ function Figure({ value, label }: { value: number | null; label: string }) {
 /* ---------------- member card ---------------- */
 
 function MemberCard({ member: m, load, isYou, delay }: { member: Member; load: Load; isYou: boolean; delay: number }) {
-  const { updateMember, removeMember, notify, showTasksFor } = useTasks();
-  const [mode, setMode] = useState<"view" | "edit" | "confirm">("view");
+  const { updateMember, removeMember, notify, showTasksFor, confirm } = useTasks();
+  const [mode, setMode] = useState<"view" | "edit">("view");
   const [name, setName] = useState(m.name);
   const [role, setRole] = useState(m.role);
   const [email, setEmail] = useState(m.email);
@@ -226,11 +226,24 @@ function MemberCard({ member: m, load, isYou, delay }: { member: Member; load: L
   };
 
   const remove = async () => {
+    const yes = await confirm({
+      title: `Do you really want to remove ${m.name}?`,
+      message: (
+        <>
+          They&apos;ll be taken off the team for everyone.{" "}
+          {load.total
+            ? `They own ${plural(load.total)}. ${load.solo ? `${plural(load.solo, true)} no other owner and will become unassigned.` : "Each one has other owners too, so none will be left unassigned."}`
+            : "They have no tasks assigned."}{" "}
+          A backup is kept before removing.
+        </>
+      ),
+      yes: "Yes, remove",
+    });
+    if (!yes) return;
     setBusy(true);
     const ok = await removeMember(m.id);
     setBusy(false);
     if (ok) notify(`${m.name} removed${load.total ? `. ${afterRemoval(load)}` : ""}`);
-    else setMode("view");
   };
 
   if (mode === "edit") {
@@ -264,29 +277,6 @@ function MemberCard({ member: m, load, isYou, delay }: { member: Member; load: L
     );
   }
 
-  if (mode === "confirm") {
-    return (
-      <Shell delay={delay} className="border-st-blocked/50 bg-st-blocked/[0.06]">
-        <div className="flex h-full flex-col">
-          <Avatar member={m} size={48} />
-          <p className="mt-4 font-display text-xl">Remove {m.name}?</p>
-          <p className="mt-1.5 text-sm text-muted">
-            {load.total ? `They'll be taken off ${plural(load.total)}. ${load.solo ? `${plural(load.solo, true)} only them, so ${load.solo === 1 ? "it" : "they"} will become unassigned.` : "Every one of them has other owners too."}` : "They have no tasks assigned."}{" "}
-            A backup is kept before removing.
-          </p>
-          <div className="mt-auto flex justify-end gap-2 pt-4">
-            <button onClick={() => setMode("view")} className="rounded-full px-3.5 py-1.5 text-sm text-muted hover:text-fg">
-              Keep
-            </button>
-            <button onClick={remove} disabled={busy} className="rounded-full bg-st-blocked px-4 py-1.5 text-sm font-medium text-white disabled:opacity-60">
-              Remove
-            </button>
-          </div>
-        </div>
-      </Shell>
-    );
-  }
-
   return (
     <Shell delay={delay} className={isYou ? "border-gold/40" : ""}>
       <div className="flex h-full flex-col">
@@ -302,7 +292,8 @@ function MemberCard({ member: m, load, isYou, delay }: { member: Member; load: L
               <PencilIcon />
             </button>
             <button
-              onClick={() => setMode("confirm")}
+              onClick={remove}
+              disabled={busy}
               aria-label={`Remove ${m.name}`}
               title="Remove"
               className="grid size-8 place-items-center rounded-full text-muted transition hover:bg-st-blocked/10 hover:text-st-blocked"

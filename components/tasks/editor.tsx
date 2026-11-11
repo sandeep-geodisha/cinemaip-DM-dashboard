@@ -19,6 +19,7 @@ import {
 } from "@/lib/tasks";
 import { useTasks, type Patch } from "@/components/tasks/provider";
 import { Avatar, DescriptionView, StatusIcon, statusColor } from "@/components/tasks/ui";
+import { deleteTaskQuestion } from "@/components/tasks/confirm";
 
 type Editing = { mode: "edit"; id: string } | { mode: "new" } | null;
 
@@ -302,7 +303,7 @@ function timeAgo(iso: string) {
 }
 
 function EditTask({ task, onClose }: { task: Task; onClose: () => void }) {
-  const { update, remove, notify, memberById, activity, actor } = useTasks();
+  const { update, remove, notify, memberById, activity, actor, confirm } = useTasks();
   const plan = planTextById().get(task.id);
   const custom = task.type === "custom";
   const title = useDraft(task.title);
@@ -552,9 +553,9 @@ function EditTask({ task, onClose }: { task: Task; onClose: () => void }) {
           <button
             type="button"
             onClick={async () => {
-              if (await remove(task.id)) onClose();
+              if ((await confirm(deleteTaskQuestion(task))) && (await remove(task.id))) onClose();
             }}
-            title="Moves the task to Removed. You can undo or restore it."
+            title="Delete this task"
             className="inline-flex items-center gap-1.5 rounded-full px-4 py-2 text-sm text-st-blocked transition hover:bg-st-blocked/10"
           >
             <TrashIcon />
