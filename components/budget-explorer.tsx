@@ -13,8 +13,8 @@ import {
   type Pillar,
 } from "@/lib/plan";
 import { SectionHead } from "@/components/section-head";
-import { OwnerChip } from "@/components/tasks/ui";
-import { activityTaskId, initiativeTaskId } from "@/lib/tasks";
+import { InitiativeTasks, OwnerChip } from "@/components/tasks/ui";
+import { activityTaskId } from "@/lib/tasks";
 
 const pad2 = (n: number) => String(n).padStart(2, "0");
 const ROMAN = ["I", "II", "III"];
@@ -115,7 +115,7 @@ export function SlateSection() {
             Twelve initiatives, <em className="gold-text not-italic">one</em> lean budget
           </>
         }
-        lede="How each line stays cheap, the number that proves it works, and the one thing to watch. Open any card for the full brief."
+        lede="How each line keeps its costs under control, the number that proves it works, and the one thing to watch. Open any card for the full brief."
       />
       <PillarFilter value={pillar} onChange={setPillar} compact />
       <Slate rows={initiatives.filter(active)} />
@@ -513,12 +513,16 @@ function Slate({ rows }: { rows: Initiative[] }) {
                   <span className="text-fg">Success looks like: </span>
                   {r.measure}
                 </p>
+                <div className="mt-5">
+                  <p className="mb-2 text-[11px] tracking-wider text-faint uppercase">Tasks on the board</p>
+                  <InitiativeTasks initiativeId={r.id} />
+                </div>
 
                 <div className="expand" data-open={isOpen ? "" : undefined}>
                   <div>
                     <dl className="mt-4 space-y-3 border-t border-line pt-4 text-sm leading-relaxed">
                       <div>
-                        <dt className="text-[11px] tracking-wider text-gold-ink uppercase">How it stays cheap</dt>
+                        <dt className="text-[11px] tracking-wider text-gold-ink uppercase">Cost control</dt>
                         <dd className="mt-0.5 text-muted">{r.costControl}</dd>
                       </div>
                       <div>
@@ -544,7 +548,6 @@ function Slate({ rows }: { rows: Initiative[] }) {
                     <path d="M3 6l5 5 5-5" fill="none" stroke="currentColor" strokeWidth="1.6" />
                   </svg>
                 </button>
-                <OwnerChip taskId={initiativeTaskId(r.id)} />
                 </div>
               </div>
             </article>

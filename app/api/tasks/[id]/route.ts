@@ -1,7 +1,10 @@
 import type { NextRequest } from "next/server";
 import { actorOf, deleteTaskForever, handle, jsonBody, removeTask, updateTask } from "@/lib/task-store";
 
-/** Updates any of: title, summary, description, assigneeId, status, priority, due, notes, pillar (custom tasks). */
+/**
+ * Updates any of: title, summary, description, status, priority, due, notes, pillar (custom tasks),
+ * and owners: assigneeIds (full list), or addAssignees / removeAssignees (lists of member ids).
+ */
 export async function PATCH(req: NextRequest, ctx: RouteContext<"/api/tasks/[id]">) {
   const { id } = await ctx.params;
   return handle(async () => updateTask(decodeURIComponent(id), await jsonBody(req), actorOf(req)));

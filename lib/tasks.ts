@@ -15,12 +15,14 @@ import {
   phases,
   sharePct,
   type Initiative,
+  type Phase,
   type Pillar,
+  type PlanActivity,
 } from "@/lib/plan";
 
 export const STATUSES = ["todo", "in_progress", "blocked", "done"] as const;
 export const PRIORITIES = ["high", "medium", "low"] as const;
-export const KINDS = ["decision", "activity", "initiative", "custom"] as const;
+export const KINDS = ["decision", "activity", "custom"] as const;
 
 export type Status = (typeof STATUSES)[number];
 export type Priority = (typeof PRIORITIES)[number];
@@ -36,13 +38,11 @@ export const PRIORITY_LABEL: Record<Priority, string> = { high: "High", medium: 
 export const KIND_LABEL: Record<Kind, string> = {
   decision: "Decision",
   activity: "Activity",
-  initiative: "Initiative",
   custom: "Custom",
 };
 export const KIND_PLURAL: Record<Kind, string> = {
   decision: "Decisions",
   activity: "Activities",
-  initiative: "Initiatives",
   custom: "Custom",
 };
 
@@ -66,9 +66,10 @@ export type Task = {
   /** Where the task sits in the plan, e.g. "Act I · Months 1–2". */
   context: string;
   pillar: Pillar | null;
-  assigneeId: string | null;
-  /** Owner's name, kept in step with the team list so the file is readable. */
-  assignee: string | null;
+  /** Everyone who owns this task (team member ids), in the order they were added. Empty = unassigned. */
+  assigneeIds: string[];
+  /** Their names, in the same order, kept in step with the team list so the file is readable. */
+  assignees: string[];
   status: Status;
   priority: Priority;
   /** YYYY-MM-DD */
@@ -94,7 +95,8 @@ export type ActivityEntry = {
 
 /** The JSON file, exactly as stored. */
 export type BoardFile = {
-  version: 2;
+  /** 3: tasks can have several owners (assigneeIds). 2: one owner (assigneeId). */
+  version: 3;
   /** Increases on every save. */
   rev: number;
   updatedAt: string;
@@ -119,10 +121,10 @@ export type BoardResponse = BoardFile & {
 /** True for a board in the current format (guards against stale pages and odd responses). */
 export function isBoardResponse(v: unknown): v is BoardResponse {
   const b = v as BoardResponse | null;
-  return !!b && b.version === 2 && Array.isArray(b.team) && Array.isArray(b.tasks) && Array.isArray(b.activity);
+  return !!b && b.version === 3 && Array.isArray(b.team) && Array.isArray(b.tasks) && Array.isArray(b.activity);
 }
 
-export const LIMITS = { name: 60, role: 60, email: 120, title: 160, summary: 300, description: 6000, notes: 4000 };
+export const LIMITS = { owners: 25, name: 60, role: 60, email: 120, title: 160, summary: 300, description: 6000, notes: 4000 };
 export const ACTIVITY_CAP = 500;
 
 /* ------------------------------------------------------------------ */
@@ -139,20 +141,45 @@ const slug = (s: string) =>
 
 export const decisionTaskId = (topic: string) => `decision:${slug(topic)}`;
 export const activityTaskId = (phase: number, initiativeId: number) => `activity:p${phase}-i${initiativeId}`;
-export const initiativeTaskId = (id: number) => `initiative:${id}`;
+/** Retired: initiatives are no longer tasks of their own; their calendar activities are. */
+export const retiredInitiativeId = (id: string) => /^initiative:\d+$/.test(id);
 
 export type PlanText = Pick<Task, "id" | "type" | "title" | "summary" | "description" | "context" | "pillar">;
 
 const money = (k: number) => (k === 0 ? "₹0 (deferred)" : `₹${k}K`);
 const payLabel = (i: Initiative) => (i.payment === "Pay on result" ? "paid only on result" : "spent upfront");
 
-function initiativeLines(i: Initiative) {
+/** Calendar tasks of one initiative, in plan order. */
+export function activitiesOf(initiativeId: number) {
+  return phases.flatMap((p) => p.activities.filter((a) => a.initiativeId === initiativeId).map((a) => ({ phase: p, a })));
+}
+
+function budgetLine(i: Initiative, a: PlanActivity) {
+  if (a.budget) return a.budget;
+  const others = activitiesOf(i.id).filter((x) => x.a !== a);
+  if (i.budgetK === 0) return "₹0 in these six months.";
+  if (!others.length) return `${money(i.budgetK)}, the whole ${i.name} line (${sharePct(i.budgetK)}% of cash), ${payLabel(i)}.`;
+  return `Shares the ${money(i.budgetK)} ${i.name} line with “${others.map((o) => o.a.activity).join("”, “")}”, ${payLabel(i)}.`;
+}
+
+/** Calendar tasks that wait on a decision. */
+function heldUpBy(topic: string) {
+  return phases.flatMap((p) =>
+    p.activities.filter((a) => a.needs?.includes(topic)).map((a) => `- Act ${ROMAN[p.phase - 1]}: ${a.activity}`),
+  );
+}
+
+function activityDescription(p: Phase, a: PlanActivity, i: Initiative) {
   return [
-    `Budget: ${money(i.budgetK)} (${sharePct(i.budgetK)}% of cash), ${payLabel(i)}`,
-    `How it stays cheap: ${i.costControl}`,
-    `Success looks like: ${i.measure}`,
-    `Watch out for: ${i.watch}`,
-  ];
+    "Steps:",
+    ...a.steps.map((x) => `- ${x}`),
+    `Done when: ${a.doneWhen}`,
+    `Measure: ${a.measure}`,
+    `Budget: ${budgetLine(i, a)}`,
+    `Watch out for: ${a.watch}`,
+    ...(a.needs?.length ? [`Decide first: ${a.needs.join(", ")} (see Decisions)`] : []),
+    `Part of: Initiative ${pad2(i.id)} · ${i.name} (${i.pillar}), Act ${ROMAN[p.phase - 1]} · ${p.period}`,
+  ].join("\n");
 }
 
 function decisionDescription(topic: string, question: string): string {
@@ -197,17 +224,18 @@ function decisionDescription(topic: string, question: string): string {
       "Decision needed: Who carries out the legal review, and by when, so the Act II contests aren't delayed.",
     ],
   };
-  return [`Question: ${question}`, ...(facts[topic] ?? [])].join("\n");
+  const held = heldUpBy(topic);
+  return [`Question: ${question}`, ...(facts[topic] ?? []), ...(held.length ? ["Holds up:", ...held] : [])].join("\n");
 }
 
-/** Default text for every plan task, in display order. */
+/**
+ * Default text for every plan task, in display order: the decisions to make
+ * before launch, then one task per calendar activity. Initiatives are the
+ * plan's budget lines; their work is these activities, so they aren't tasks
+ * of their own (that would repeat the same content twice).
+ */
 export function planCatalogue(): PlanText[] {
   const byId = new Map(initiatives.map((i) => [i.id, i]));
-  const actsFor = (id: number) =>
-    phases.flatMap((p) =>
-      p.activities.filter((a) => a.initiativeId === id).map((a) => `- Act ${ROMAN[p.phase - 1]} (${p.period}): ${a.activity}`),
-    );
-
   return [
     ...decisions.map((d) => ({
       id: decisionTaskId(d.topic),
@@ -225,30 +253,13 @@ export function planCatalogue(): PlanText[] {
           id: activityTaskId(p.phase, a.initiativeId),
           type: "activity" as const,
           title: a.activity,
-          summary: `${ini.name} · ${ini.pillar}`,
-          description: [
-            `What: ${a.activity}.`,
-            `When: Act ${ROMAN[p.phase - 1]} · ${p.period} (${p.name})`,
-            `Initiative: ${pad2(ini.id)} · ${ini.name} (${ini.pillar})`,
-            ...initiativeLines(ini),
-          ].join("\n"),
-          context: `Act ${ROMAN[p.phase - 1]} · ${p.period}`,
+          summary: a.summary,
+          description: activityDescription(p, a, ini),
+          context: `Act ${ROMAN[p.phase - 1]} · ${p.period} · ${ini.name}`,
           pillar: ini.pillar,
         };
       }),
     ),
-    ...initiatives.map((i) => {
-      const acts = actsFor(i.id);
-      return {
-        id: initiativeTaskId(i.id),
-        type: "initiative" as const,
-        title: i.name,
-        summary: i.measure,
-        description: [`Pillar: ${i.pillar}`, ...initiativeLines(i), ...(acts.length ? ["Calendar:", ...acts] : [])].join("\n"),
-        context: `Initiative ${pad2(i.id)} · ${i.pillar}`,
-        pillar: i.pillar,
-      };
-    }),
   ];
 }
 
@@ -262,8 +273,8 @@ export const isPlanTaskId = (id: string) => planTextById().has(id);
 export function seedTask(p: PlanText, now: string): Task {
   return {
     ...p,
-    assigneeId: null,
-    assignee: null,
+    assigneeIds: [],
+    assignees: [],
     status: "todo",
     priority: p.type === "decision" ? "high" : "medium",
     due: null,
@@ -293,6 +304,15 @@ export const todayISO = () => {
 
 export const isOverdue = (t: Pick<Task, "due" | "status">, today = todayISO()) =>
   !!t.due && t.status !== "done" && t.due < today;
+
+/** True when `memberId` is one of the task's owners. */
+export const isOwner = (t: Pick<Task, "assigneeIds">, memberId: string) => t.assigneeIds.includes(memberId);
+
+/** "Asha", "Asha and Ravi", "Asha, Ravi and Meera". */
+export function joinNames(names: string[]) {
+  if (names.length <= 1) return names[0] ?? "";
+  return `${names.slice(0, -1).join(", ")} and ${names[names.length - 1]}`;
+}
 
 export function formatDate(due: string) {
   const [y, m, d] = due.split("-").map(Number);

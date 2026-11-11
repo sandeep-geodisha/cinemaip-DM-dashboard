@@ -43,7 +43,7 @@ On Redis, saves are compare-and-swap, so people editing at the same moment never
 
 ```jsonc
 {
-  "version": 2,
+  "version": 3,
   "rev": 42,                        // goes up on every save
   "updatedAt": "2026-11-10T14:41:34.721Z",
   "team": [
@@ -52,15 +52,15 @@ On Redis, saves are compare-and-swap, so people editing at the same moment never
   ],
   "tasks": [
     {
-      "id": "decision:cash-cap",     // plan tasks: decision:…, activity:p1-i1, initiative:9; your own: custom:…
-      "type": "decision",            // decision | activity | initiative | custom
+      "id": "decision:cash-cap",     // plan tasks: decision:… or activity:p1-i1 (Act I, initiative 1); your own: custom:…
+      "type": "decision",            // decision | activity | custom
       "title": "Cash cap",
       "summary": "One line shown on the card",
       "description": "Context: …\nSteps:\n- …\nDone when: …",
       "context": "Decision before launch",
       "pillar": null,                // or "Be found" | "Be seen" | "Build the community" | "Contests and intelligence"
-      "assigneeId": "m_1a2b3c4d",    // must match a team id; "assignee" is filled in from the team
-      "assignee": "Priya Sharma",
+      "assigneeIds": ["m_1a2b3c4d", "m_5e6f7a8b"],  // owners: one person, several, or [] for nobody
+      "assignees": ["Priya Sharma", "Ravi Kumar"],   // filled in from the team, same order
       "status": "in_progress",       // todo | in_progress | blocked | done
       "priority": "high",            // high | medium | low
       "due": "2026-11-30",           // YYYY-MM-DD or null
@@ -77,8 +77,12 @@ On Redis, saves are compare-and-swap, so people editing at the same moment never
 ```
 
 **Editing by hand.** You can edit the file in any editor while the app runs.
-- **Tidying.** On the next read the app checks it and fixes small problems: it gives new people an id, clears owners who aren't on the team, and adds back any missing plan task.
+- **Tidying.** On the next read the app checks it and fixes small problems: it gives new people an id, clears owners who aren't on the team, and adds back any missing plan task. In `assigneeIds` you can type a person's name or email instead of their id; it's swapped for the id. Files from older versions (one `assigneeId` per task) are upgraded automatically after a backup.
 - **Broken JSON.** If the file isn't valid JSON, the page keeps showing the last good version and pauses edits, so your file is never overwritten. Fix the file and it carries on.
+
+**Plan tasks.** The board's plan tasks are the 7 decisions and the 16 calendar activities in `lib/plan.ts`, each with its own steps, "Done when", measure, budget share and the decisions it waits on. Initiatives are budget lines, not tasks: their cards list the calendar tasks that deliver them.
+
+**Changing plan wording.** When the wording in `lib/plan.ts` changes, saved tasks still on the old default wording are updated automatically; anything someone edited by hand is kept. Before changing the wording, add the current fingerprints to `lib/plan-legacy.ts` so the upgrade recognises the old text.
 
 **Descriptions.** A description is plain text with two conventions. A line like `Label: text` gets a bold label, and a line starting with `- ` becomes a bullet.
 

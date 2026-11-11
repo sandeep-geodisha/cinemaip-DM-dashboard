@@ -17,7 +17,7 @@ import {
 } from "@/lib/tasks";
 import { SectionHead } from "@/components/section-head";
 import { useTasks } from "@/components/tasks/provider";
-import { Avatar, OwnerChip, PriorityPill, StatusIcon, formatDue, statusColor } from "@/components/tasks/ui";
+import { AssignMenu, Avatar, OwnerChip, PriorityPill, StatusIcon, formatDue, statusColor } from "@/components/tasks/ui";
 import { PencilIcon, TrashIcon } from "@/components/tasks/editor";
 
 const PRIORITY_RANK = Object.fromEntries(PRIORITIES.map((p, i) => [p, i]));
@@ -48,8 +48,8 @@ export function TaskBoard() {
       tasks.filter(
         (t) =>
           (!kind || t.type === kind) &&
-          (!owner || (owner === "none" ? !t.assigneeId : t.assigneeId === owner)) &&
-          (!q || `${t.title} ${t.summary} ${t.description} ${t.context} ${t.notes} ${t.assignee ?? ""}`.toLowerCase().includes(q)),
+          (!owner || (owner === "none" ? t.assigneeIds.length === 0 : t.assigneeIds.includes(owner))) &&
+          (!q || `${t.title} ${t.summary} ${t.description} ${t.context} ${t.notes} ${t.assignees.join(" ")}`.toLowerCase().includes(q)),
       ),
     );
   }, [tasks, kind, owner, query]);
@@ -64,7 +64,7 @@ export function TaskBoard() {
             Who is doing <em className="gold-text not-italic">what</em>, and by when
           </>
         }
-        lede="Every decision, calendar activity and initiative is a task with a full brief. Give each one an owner, a due date and a status. Every change is saved straight away, so the whole team sees the same board."
+        lede="Every decision and every calendar activity is a task with its own brief: the steps, what done looks like and how it is measured. Give each one owners (one person or several), a due date and a status. Every change is saved straight away, so the whole team sees the same board."
       />
 
       {fileError && (
@@ -135,7 +135,7 @@ export function TaskBoard() {
             >
               <Avatar member={actor} size={22} />
               My tasks
-              <span className="tabular text-xs text-faint">{tasks.filter((t) => t.assigneeId === actor.id).length}</span>
+              <span className="tabular text-xs text-faint">{tasks.filter((t) => t.assigneeIds.includes(actor.id)).length}</span>
             </button>
           )}
           <label className="sr-only" htmlFor="owner-filter">
@@ -270,7 +270,7 @@ function Progress() {
   const counts = Object.fromEntries(STATUSES.map((s) => [s, tasks.filter((t) => t.status === s).length])) as Record<Status, number>;
   const total = tasks.length || 1;
   const donePct = Math.round((counts.done / total) * 100);
-  const unassigned = tasks.filter((t) => !t.assigneeId).length;
+  const unassigned = tasks.filter((t) => t.assigneeIds.length === 0).length;
   const overdue = tasks.filter((t) => isOverdue(t, today)).length;
 
   return (
@@ -590,7 +590,7 @@ function TaskCard({ task: t }: { task: Task }) {
 /* ---------------- list ---------------- */
 
 function ListView({ tasks }: { tasks: Task[] }) {
-  const { members, update, openTask, notify, memberById } = useTasks();
+  const { update, openTask } = useTasks();
   if (tasks.length === 0) return <p className="rounded-2xl border border-dashed border-line-2 py-12 text-center text-sm text-muted">No tasks match these filters.</p>;
   const sel = "rounded-lg border border-line bg-panel px-2 py-1.5 text-xs focus:border-gold/60 focus:outline-none";
   return (
@@ -599,7 +599,7 @@ function ListView({ tasks }: { tasks: Task[] }) {
         <thead className="text-left text-xs text-faint">
           <tr>
             <th className="border-b border-line px-5 py-3 font-medium">Task</th>
-            <th className="border-b border-line px-3 py-3 font-medium">Owner</th>
+            <th className="border-b border-line px-3 py-3 font-medium">Owners</th>
             <th className="border-b border-line px-3 py-3 font-medium">Status</th>
             <th className="border-b border-line px-3 py-3 font-medium">Priority</th>
             <th className="border-b border-line px-3 py-3 font-medium">Due</th>
@@ -621,22 +621,7 @@ function ListView({ tasks }: { tasks: Task[] }) {
                 </button>
               </td>
               <td className="border-b border-line px-3 py-3">
-                <select
-                  aria-label={`Owner of ${t.title}`}
-                  value={t.assigneeId ?? ""}
-                  onChange={(e) => {
-                    const id = e.target.value || null;
-                    update(t.id, { assigneeId: id }).then((ok) => ok && notify(id ? `Assigned to ${memberById.get(id)?.name}` : "Unassigned"));
-                  }}
-                  className={`${sel} max-w-[160px]`}
-                >
-                  <option value="">Unassigned</option>
-                  {members.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.name}
-                    </option>
-                  ))}
-                </select>
+                <AssignMenu task={t} wide />
               </td>
               <td className="border-b border-line px-3 py-3">
                 <select

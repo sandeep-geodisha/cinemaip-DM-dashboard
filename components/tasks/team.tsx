@@ -10,11 +10,13 @@ import { PencilIcon, TrashIcon } from "@/components/tasks/editor";
 const field =
   "w-full min-w-0 rounded-lg border border-line-2 bg-panel px-3 py-2 text-sm placeholder:text-faint focus:border-gold/60 focus:outline-none focus:ring-2 focus:ring-gold/20";
 
-type Load = { total: number; open: number; inProgress: number; done: number; blocked: number; overdue: number };
+type Load = { total: number; open: number; inProgress: number; done: number; blocked: number; overdue: number; shared: number; solo: number };
 
 function loadFor(tasks: Task[], id: string, today: string): Load {
-  const mine = tasks.filter((t) => t.assigneeId === id);
+  const mine = tasks.filter((t) => t.assigneeIds.includes(id));
   return {
+    shared: mine.filter((t) => t.assigneeIds.length > 1).length,
+    solo: mine.filter((t) => t.assigneeIds.length === 1).length,
     total: mine.length,
     open: mine.filter((t) => t.status !== "done").length,
     inProgress: mine.filter((t) => t.status === "in_progress").length,
@@ -31,7 +33,7 @@ export function TeamSection() {
   const [importReport, setImportReport] = useState<ImportResult | null>(null);
   const [adding, setAdding] = useState(false);
   const today = todayISO();
-  const assigned = tasks.filter((t) => t.assigneeId).length;
+  const assigned = tasks.filter((t) => t.assigneeIds.length > 0).length;
   const unassigned = tasks.length - assigned;
 
   const onImport = async (file: File | undefined) => {
@@ -227,7 +229,7 @@ function MemberCard({ member: m, load, isYou, delay }: { member: Member; load: L
     setBusy(true);
     const ok = await removeMember(m.id);
     setBusy(false);
-    if (ok) notify(load.total ? `${m.name} removed. Their ${load.total} task${load.total === 1 ? " is" : "s are"} now unassigned.` : `${m.name} removed`);
+    if (ok) notify(`${m.name} removed${load.total ? `. ${afterRemoval(load)}` : ""}`);
     else setMode("view");
   };
 
@@ -269,8 +271,8 @@ function MemberCard({ member: m, load, isYou, delay }: { member: Member; load: L
           <Avatar member={m} size={48} />
           <p className="mt-4 font-display text-xl">Remove {m.name}?</p>
           <p className="mt-1.5 text-sm text-muted">
-            {load.total ? `Their ${load.total} task${load.total === 1 ? "" : "s"} will become unassigned.` : "They have no tasks assigned."} A backup is
-            kept before removing.
+            {load.total ? `They'll be taken off ${plural(load.total)}. ${load.solo ? `${plural(load.solo, true)} only them, so ${load.solo === 1 ? "it" : "they"} will become unassigned.` : "Every one of them has other owners too."}` : "They have no tasks assigned."}{" "}
+            A backup is kept before removing.
           </p>
           <div className="mt-auto flex justify-end gap-2 pt-4">
             <button onClick={() => setMode("view")} className="rounded-full px-3.5 py-1.5 text-sm text-muted hover:text-fg">
@@ -332,7 +334,10 @@ function MemberCard({ member: m, load, isYou, delay }: { member: Member; load: L
 
         <div className="mt-4">
           <div className="flex items-center justify-between text-[11px] text-faint">
-            <span>{load.total ? `${load.done} of ${load.total} done` : "No tasks yet"}</span>
+            <span>
+              {load.total ? `${load.done} of ${load.total} done` : "No tasks yet"}
+              {load.shared > 0 && <span title="Tasks this person shares with other owners"> · {load.shared} shared</span>}
+            </span>
             {load.blocked > 0 && <span className="text-st-blocked">{load.blocked} blocked</span>}
           </div>
           <div className="mt-1.5 h-1.5 overflow-hidden rounded-full bg-[rgb(var(--tint)/0.07)]">
@@ -352,6 +357,10 @@ function MemberCard({ member: m, load, isYou, delay }: { member: Member; load: L
     </Shell>
   );
 }
+
+const plural = (n: number, has = false) => `${n} task${n === 1 ? "" : "s"}${has ? (n === 1 ? " has" : " have") : ""}`;
+const afterRemoval = (l: Load) =>
+  l.solo ? `${plural(l.solo, true)} no owner now.` : `Their ${plural(l.total)} still ${l.total === 1 ? "has" : "have"} other owners.`;
 
 function Mini({ value, label, tone }: { value: number; label: string; tone?: "danger" }) {
   return (

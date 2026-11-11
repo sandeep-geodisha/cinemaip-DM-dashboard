@@ -431,6 +431,21 @@ dialog.identify::backdrop {
 @keyframes toast-in {
   from { transform: translateY(16px) scale(0.96); opacity: 0; }
 }
+/* Owner menu (native popover, so it isn't clipped by scrolling columns). */
+.owner-menu {
+  position: fixed;
+  inset: auto;
+  margin: 0;
+}
+.owner-menu:popover-open {
+  animation: menu-in 0.22s cubic-bezier(0.2, 0.7, 0.1, 1);
+}
+@keyframes menu-in {
+  from { transform: translateY(-6px) scale(0.98); opacity: 0; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .owner-menu:popover-open { animation: none; }
+}
 input[type="date"]::-webkit-calendar-picker-indicator {
   opacity: 0.6;
   cursor: pointer;

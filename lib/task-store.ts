@@ -18,13 +18,15 @@
 //   missing plan tasks). If the file isn't valid JSON, the page keeps showing
 //   the last good copy and edits pause, so a hand-edit typo is never
 //   overwritten.
-// - Files from the first version of the board are upgraded, after a backup.
+// - Files from older versions of the board are upgraded, after a backup
+//   (v1: state keyed by id; v2: one owner per task, now a list of owners).
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdir, readFile, readdir, rename, stat, unlink, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { Redis } from "@upstash/redis";
 import { PILLARS, type Pillar } from "@/lib/plan";
+import { LEGACY_PLAN_WORDING } from "@/lib/plan-legacy";
 import {
   ACTIVITY_CAP,
   KINDS,
@@ -35,8 +37,10 @@ import {
   STATUS_LABEL,
   formatDate,
   isPlanTaskId,
+  joinNames,
   planCatalogue,
   planTextById,
+  retiredInitiativeId,
   seedTask,
   type ActivityEntry,
   type BoardFile,
@@ -275,8 +279,50 @@ function normaliseMember(v: unknown, ts: string): Member | null {
   };
 }
 
-function normaliseTask(v: Obj, ts: string): Task | null {
+/**
+ * Owner ids from a stored task: the `assigneeIds` list plus a version 2
+ * `assigneeId`. Entries may also be a person's name or email (handy when
+ * editing the file by hand); they're swapped for the id. Unknown people are dropped.
+ */
+function ownerIds(v: Obj, resolve: (key: string) => string | undefined): string[] {
+  const raw = [...(Array.isArray(v.assigneeIds) ? v.assigneeIds : []), v.assigneeId];
+  const out: string[] = [];
+  for (const x of raw) {
+    const id = typeof x === "string" && x.trim() ? resolve(x.trim()) : undefined;
+    if (id && !out.includes(id)) out.push(id);
+  }
+  return out.slice(0, LIMITS.owners);
+}
+
+/** Plan wording that has since been replaced, updated wherever it was saved. */
+const RETIRED_WORDING: [RegExp, string][] = [
+  [/How it stays cheap:/g, "Cost control:"],
+  [/Cheap model, under 40 simulation rounds/g, "Low-cost model, under 40 simulation rounds"],
+];
+const reword = (v: unknown) => (typeof v === "string" ? RETIRED_WORDING.reduce((s, [from, to]) => s.replace(from, to), v) : v);
+
+const fingerprint = (s: string) => createHash("sha256").update(s).digest("hex").slice(0, 16);
+
+/** Plan wording nobody edited, updated to the current plan. Returns the fields it changed. */
+function refreshPlanWording(v: Obj, id: string): string[] {
+  const plan = planTextById().get(id);
+  const old = LEGACY_PLAN_WORDING[id];
+  if (!plan || !old) return [];
+  const changed: string[] = [];
+  (["title", "summary", "description"] as const).forEach((k, i) => {
+    const cur = v[k];
+    if (typeof cur === "string" && cur !== plan[k] && old.some((o) => o[i] === fingerprint(cur))) {
+      v[k] = plan[k];
+      changed.push(k);
+    }
+  });
+  return changed;
+}
+
+function normaliseTask(raw: Obj, ts: string, resolve: (key: string) => string | undefined, onRefresh?: () => void): Task | null {
+  const v: Obj = { ...raw, title: reword(raw.title), summary: reword(raw.summary), description: reword(raw.description), notes: reword(raw.notes) };
   const id = typeof v.id === "string" ? v.id : "";
+  if (refreshPlanWording(v, id).length) onRefresh?.();
   const plan = planTextById().get(id);
   const type = plan ? plan.type : pick(v.type, KINDS, "custom");
   if (!id || (type !== "custom" && !plan)) return null;
@@ -291,8 +337,8 @@ function normaliseTask(v: Obj, ts: string): Task | null {
     description: typeof v.description === "string" ? longText(v.description, LIMITS.description) : (plan?.description ?? ""),
     context: plan ? plan.context : pillar ? `Custom · ${pillar}` : "Custom task",
     pillar,
-    assigneeId: typeof v.assigneeId === "string" && v.assigneeId ? v.assigneeId : null,
-    assignee: null, // filled from the team below
+    assigneeIds: ownerIds(v, resolve),
+    assignees: [], // filled from the team below
     status: pick(v.status, STATUSES, "todo"),
     priority: pick(v.priority, PRIORITIES, type === "decision" ? "high" : "medium"),
     due: dateOrNull(v.due),
@@ -304,7 +350,7 @@ function normaliseTask(v: Obj, ts: string): Task | null {
   };
 }
 
-/** Turns a version 1 file (state keyed by id) into version 2 objects. */
+/** Turns a version 1 file (state keyed by id) into the current shape. */
 function upgradeV1(raw: Obj, ts: string): Obj {
   const state = isObj(raw.tasks) ? raw.tasks : {};
   const removed = new Set(Array.isArray(raw.removed) ? raw.removed : []);
@@ -339,24 +385,44 @@ function upgradeV1(raw: Obj, ts: string): Obj {
     });
   }
   return {
-    version: 2,
+    version: 3,
     rev: 1,
     updatedAt: ts,
     team: Array.isArray(raw.members) ? raw.members : [],
     tasks,
     activity: [
-      { id: newId("a_"), at: ts, by: "System", taskId: null, subject: "Data file", action: "upgraded to version 2 (full task details stored)" },
+      { id: newId("a_"), at: ts, by: "System", taskId: null, subject: "Data file", action: "upgraded to version 3 (full task details, several owners per task)" },
     ],
   };
+}
+
+/** Drops owners who aren't on the team and keeps owner names in step with it. */
+function syncOwners(team: Member[], tasks: Task[]) {
+  const byId = new Map(team.map((m) => [m.id, m]));
+  for (const t of tasks) {
+    t.assigneeIds = t.assigneeIds.filter((id) => byId.has(id));
+    t.assignees = t.assigneeIds.map((id) => byId.get(id)!.name);
+  }
 }
 
 /** Checks and tidies anything read from disk. Idempotent: normalising its own output changes nothing. */
 function normalise(raw: unknown): BoardFile {
   const ts = now();
   let src: Obj;
-  if (raw === null) src = { version: 2, rev: 0, updatedAt: ts, team: [], tasks: [], activity: [] };
+  if (raw === null) src = { version: 3, rev: 0, updatedAt: ts, team: [], tasks: [], activity: [] };
   else if (!isObj(raw)) throw new FileError("The data file must contain a JSON object.");
-  else src = raw.version === 2 ? raw : upgradeV1(raw, ts);
+  else if (typeof raw.version === "number" && raw.version > 3)
+    throw new FileError(`The data file is version ${raw.version}, newer than this app understands. Update the app.`);
+  else if (raw.version === 3) src = raw;
+  else if (raw.version === 2)
+    src = {
+      ...raw,
+      activity: [
+        { id: newId("a_"), at: ts, by: "System", taskId: null, subject: "Data file", action: "upgraded to version 3 (tasks can have several owners)" },
+        ...(Array.isArray(raw.activity) ? raw.activity : []),
+      ],
+    };
+  else src = upgradeV1(raw, ts);
 
   // Team: valid, unique ids and names.
   const team: Member[] = [];
@@ -371,27 +437,55 @@ function normalise(raw: unknown): BoardFile {
     team.push(m);
   }
 
+  // Owners are stored by id; by hand, a name or email works too.
+  const lookup = new Map<string, string>();
+  for (const m of team) {
+    if (m.email) lookup.set(m.email.toLowerCase(), m.id);
+    lookup.set(m.name.toLowerCase(), m.id);
+  }
+  for (const m of team) lookup.set(m.id, m.id);
+  const resolve = (key: string) => lookup.get(key) ?? lookup.get(key.toLowerCase());
+
   // Tasks: valid, unique, plus any plan task not yet in the file.
   const tasks: Task[] = [];
   const seenTasks = new Set<string>();
+  const retired: { initiative: string; owners: string[]; notes: string }[] = [];
+  let refreshed = 0;
   for (const v of Array.isArray(src.tasks) ? src.tasks : []) {
     if (!isObj(v)) continue;
-    const t = normaliseTask(v, ts);
+    if (typeof v.id === "string" && retiredInitiativeId(v.id)) {
+      if (v.removed !== true) retired.push({ initiative: v.id.split(":")[1], owners: ownerIds(v, resolve), notes: longText(reword(v.notes), LIMITS.notes) });
+      else retired.push({ initiative: v.id.split(":")[1], owners: [], notes: "" });
+      continue;
+    }
+    const t = normaliseTask(v, ts, resolve, () => refreshed++);
     if (!t || seenTasks.has(t.id)) continue;
     seenTasks.add(t.id);
     tasks.push(t);
   }
   for (const p of planCatalogue()) if (!seenTasks.has(p.id)) tasks.push(seedTask(p, ts));
+  const upgradeNotes: string[] = [];
+  if (refreshed) upgradeNotes.push(`task briefs updated to the latest plan (${refreshed} task${refreshed === 1 ? "" : "s"})`);
 
-  // Owners must exist; keep owner names in step with the team.
-  const byId = new Map(team.map((m) => [m.id, m]));
-  for (const t of tasks) {
-    const m = t.assigneeId ? byId.get(t.assigneeId) : undefined;
-    t.assigneeId = m ? m.id : null;
-    t.assignee = m ? m.name : null;
+  // Initiatives used to be tasks too, repeating their calendar tasks. Their
+  // owners and notes move to those calendar tasks, then they're dropped.
+  if (retired.length) {
+    for (const r of retired) {
+      const acts = tasks.filter((t) => new RegExp(`^activity:p\\d+-i${r.initiative}$`).test(t.id));
+      for (const t of acts) for (const o of r.owners) if (!t.assigneeIds.includes(o)) t.assigneeIds.push(o);
+      if (r.notes && acts[0] && !acts[0].notes.includes(r.notes))
+        acts[0].notes = longText(`${acts[0].notes ? `${acts[0].notes}\n\n` : ""}From the initiative: ${r.notes}`, LIMITS.notes);
+    }
+    const moved = retired.filter((r) => r.owners.length || r.notes).length;
+    upgradeNotes.push(
+      `initiative tasks merged into their calendar tasks, so nothing is listed twice${moved ? ` (owners and notes from ${moved} kept)` : ""}`,
+    );
   }
 
-  const activity: ActivityEntry[] = (Array.isArray(src.activity) ? src.activity : [])
+  syncOwners(team, tasks);
+
+  const planNotes: ActivityEntry[] = upgradeNotes.map((action) => ({ id: newId("a_"), at: ts, by: "System", taskId: null, subject: "Plan tasks", action }));
+  const activity: ActivityEntry[] = [...planNotes, ...(Array.isArray(src.activity) ? src.activity : [])]
     .filter(isObj)
     .map((a) => ({
       id: typeof a.id === "string" ? a.id : newId("a_"),
@@ -404,7 +498,7 @@ function normalise(raw: unknown): BoardFile {
     .slice(0, ACTIVITY_CAP);
 
   return {
-    version: 2,
+    version: 3,
     rev: typeof src.rev === "number" && src.rev >= 0 ? Math.floor(src.rev) : 0,
     updatedAt: isoOr(src.updatedAt, ts),
     team,
@@ -442,7 +536,7 @@ async function load(): Promise<Loaded> {
 
   let etag = snap.etag;
   if (raw === null || strip(raw) !== strip(board)) {
-    const upgrading = isObj(raw) && raw.version !== 2;
+    const upgrading = isObj(raw) && raw.version !== 3;
     if (snap.text) await be.backup(snap.text, upgrading ? "before-upgrade" : "before-tidy", true);
     board.rev += 1;
     board.updatedAt = now();
@@ -501,12 +595,7 @@ function mutate(actorId: string | null, fn: (d: BoardFile, ctx: Ctx) => void, op
       const ts = now();
       fn(d, { by, log: (subject, action, taskId = null) => entries.push({ id: newId("a_"), at: ts, by, taskId, subject, action }) });
 
-      const byId = new Map(d.team.map((m) => [m.id, m]));
-      for (const t of d.tasks) {
-        const m = t.assigneeId ? byId.get(t.assigneeId) : undefined;
-        t.assigneeId = m ? m.id : null;
-        t.assignee = m ? m.name : null;
-      }
+      syncOwners(d.team, d.tasks);
       d.activity = [...entries.reverse(), ...d.activity].slice(0, ACTIVITY_CAP);
       d.rev += 1;
       d.updatedAt = ts;
@@ -573,18 +662,51 @@ function findTask(d: BoardFile, id: string) {
   return t;
 }
 
-/** Applies owner/status/priority/due/notes from `body` and returns readable change notes. */
+const idList = (v: unknown, field: string): string[] => {
+  if (!Array.isArray(v) || v.some((x) => typeof x !== "string")) throw new HttpError(400, `${field} must be a list of team member ids`);
+  return [...new Set(v as string[])];
+};
+
+/**
+ * Owners, from any of:
+ * - assigneeIds: the full list (replaces the current owners)
+ * - addAssignees / removeAssignees: people to add or take off, leaving
+ *   everyone else as they are. The page uses these, so two people changing
+ *   owners at the same moment never undo each other.
+ * Returns a readable note of what changed, or "".
+ */
+function ownerChange(d: BoardFile, t: Task, body: Obj): string {
+  if ("assigneeId" in body)
+    throw new HttpError(409, "This page is out of date (tasks can now have several owners). Reload the page and try again.");
+  const has = (k: string) => k in body && body[k] !== undefined;
+  if (!has("assigneeIds") && !has("addAssignees") && !has("removeAssignees")) return "";
+  const known = new Set(d.team.map((m) => m.id));
+  const before = t.assigneeIds;
+  let next = has("assigneeIds") ? (body.assigneeIds === null ? [] : idList(body.assigneeIds, "assigneeIds")) : [...before];
+  const add = has("addAssignees") ? idList(body.addAssignees, "addAssignees") : [];
+  const drop = new Set(has("removeAssignees") ? idList(body.removeAssignees, "removeAssignees") : []);
+  for (const id of [...next, ...add]) if (!known.has(id)) throw new HttpError(400, "That person isn't on the team any more. Reload the page.");
+  next = [...next, ...add.filter((id) => !next.includes(id))].filter((id) => known.has(id) && !drop.has(id));
+  if (next.length > LIMITS.owners) throw new HttpError(400, `A task can have at most ${LIMITS.owners} owners`);
+  t.assigneeIds = next;
+
+  const name = (id: string) => d.team.find((m) => m.id === id)?.name ?? "someone";
+  const added = next.filter((id) => !before.includes(id)).map(name);
+  const removed = before.filter((id) => !next.includes(id)).map(name);
+  if (!added.length && !removed.length) return "";
+  if (!before.length) return `assigned to ${joinNames(added)}`;
+  if (!next.length) return `unassigned (was ${joinNames(removed)})`;
+  const parts: string[] = [];
+  if (added.length) parts.push(`added ${joinNames(added)} as owner${added.length === 1 ? "" : "s"}`);
+  if (removed.length) parts.push(`took ${joinNames(removed)} off as owner${removed.length === 1 ? "" : "s"}`);
+  return parts.join("; ");
+}
+
+/** Applies owners/status/priority/due/notes from `body` and returns readable change notes. */
 function applyState(d: BoardFile, t: Task, body: Obj): string[] {
   const changes: string[] = [];
-  if ("assigneeId" in body) {
-    const a = body.assigneeId;
-    if (a !== null && !d.team.some((m) => m.id === a)) throw new HttpError(400, "That person isn't on the team any more");
-    const next = (a as string | null) ?? null;
-    if (next !== t.assigneeId) {
-      t.assigneeId = next;
-      changes.push(next ? `assigned to ${d.team.find((m) => m.id === next)!.name}` : "unassigned");
-    }
-  }
+  const owners = ownerChange(d, t, body);
+  if (owners) changes.push(owners);
   if ("status" in body) {
     const s = oneOf<Status>(body.status, STATUSES, "status");
     if (s !== t.status) changes.push(`status ${STATUS_LABEL[t.status]} → ${STATUS_LABEL[s]}`);
@@ -656,8 +778,8 @@ export function createTask(body: Obj, actorId: string | null) {
       description: str(body.description, "description", LIMITS.description, false, true),
       context: pillar ? `Custom · ${pillar}` : "Custom task",
       pillar,
-      assigneeId: null,
-      assignee: null,
+      assigneeIds: [],
+      assignees: [],
       status: "todo",
       priority: "medium",
       due: null,
@@ -751,7 +873,7 @@ export function updateMember(id: string, body: Obj, actorId: string | null) {
   });
 }
 
-/** Removes a member; their tasks become unassigned. */
+/** Removes a member and takes them off every task; tasks they owned alone become unassigned. */
 export function removeMember(id: string, actorId: string | null) {
   return mutate(
     actorId,
@@ -759,12 +881,18 @@ export function removeMember(id: string, actorId: string | null) {
       const m = d.team.find((x) => x.id === id);
       if (!m) throw new HttpError(404, "That person isn't on the team any more");
       d.team = d.team.filter((x) => x.id !== id);
-      const freed = d.tasks.filter((t) => t.assigneeId === id);
-      for (const t of freed) {
-        t.assigneeId = null;
+      const theirs = d.tasks.filter((t) => t.assigneeIds.includes(id));
+      for (const t of theirs) {
+        t.assigneeIds = t.assigneeIds.filter((x) => x !== id);
         t.updatedAt = now();
+        t.updatedBy = ctx.by;
       }
-      ctx.log(m.name, `removed from the team${freed.length ? `; ${freed.length} task${freed.length === 1 ? "" : "s"} now unassigned` : ""}`);
+      const orphaned = theirs.filter((t) => !t.assigneeIds.length).length;
+      const n = (k: number) => `${k} task${k === 1 ? "" : "s"}`;
+      ctx.log(
+        m.name,
+        `removed from the team${theirs.length ? `; taken off ${n(theirs.length)}${orphaned ? ` (${orphaned} now unassigned)` : ""}` : ""}`,
+      );
     },
     { forceBackup: "before-remove-member" },
   );

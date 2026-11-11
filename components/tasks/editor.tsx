@@ -118,7 +118,8 @@ function StatusOption(s: Status) {
   );
 }
 
-function OwnerPicker({ value, onChange }: { value: string | null; onChange: (id: string | null) => void }) {
+/** Pick any number of owners. `onToggle` adds or removes one person; `onClear` removes everyone. */
+function OwnerPicker({ value, onToggle, onClear }: { value: string[]; onToggle: (id: string, add: boolean) => void; onClear: () => void }) {
   const { members, addMember } = useTasks();
   const [adding, setAdding] = useState(false);
   const [name, setName] = useState("");
@@ -131,7 +132,7 @@ function OwnerPicker({ value, onChange }: { value: string | null; onChange: (id:
     const m = await addMember({ name, role });
     setBusy(false);
     if (m) {
-      onChange(m.id);
+      if (!value.includes(m.id)) onToggle(m.id, true);
       setName("");
       setRole("");
       setAdding(false);
@@ -141,12 +142,12 @@ function OwnerPicker({ value, onChange }: { value: string | null; onChange: (id:
   return (
     <div className="flex flex-col gap-2">
       <div className="flex flex-wrap gap-2">
-        <OwnerOption on={value === null} onClick={() => onChange(null)}>
+        <OwnerOption on={value.length === 0} onClick={onClear}>
           <span className="grid size-6 place-items-center rounded-full border border-dashed border-line-2 text-faint">–</span>
-          Unassigned
+          {value.length ? "Clear all" : "Unassigned"}
         </OwnerOption>
         {members.map((m) => (
-          <OwnerOption key={m.id} on={value === m.id} onClick={() => onChange(m.id)}>
+          <OwnerOption key={m.id} on={value.includes(m.id)} onClick={() => onToggle(m.id, !value.includes(m.id))}>
             <Avatar member={m} size={24} />
             <span className="flex flex-col items-start leading-tight">
               <span>{m.name}</span>
@@ -205,11 +206,15 @@ function OwnerPicker({ value, onChange }: { value: string | null; onChange: (id:
   );
 }
 
+function OwnersHint({ n }: { n: number }) {
+  return <span className="text-xs text-faint">{n ? `${n} owner${n === 1 ? "" : "s"} · tick more to share it` : "Tick one or more people"}</span>;
+}
+
 function OwnerOption({ on, onClick, children }: { on: boolean; onClick: () => void; children: ReactNode }) {
   return (
     <button
       type="button"
-      role="radio"
+      role="checkbox"
       aria-checked={on}
       onClick={onClick}
       className={`inline-flex items-center gap-2 rounded-full border py-1 pr-3.5 pl-1 text-xs transition ${
@@ -350,9 +355,9 @@ function EditTask({ task, onClose }: { task: Task; onClose: () => void }) {
     }
   };
 
-  const assign = (id: string | null) => {
-    const m = id ? memberById.get(id) : null;
-    set({ assigneeId: id }, m ? `Assigned to ${m.name}` : "Unassigned");
+  const toggleOwner = (id: string, add: boolean) => {
+    const m = memberById.get(id);
+    set(add ? { addAssignees: [id] } : { removeAssignees: [id] }, m && (add ? `Added ${m.name} as an owner` : `Took ${m.name} off this task`));
   };
 
   return (
@@ -474,8 +479,12 @@ function EditTask({ task, onClose }: { task: Task; onClose: () => void }) {
           )}
         </Field>
 
-        <Field label="Owner">
-          <OwnerPicker value={task.assigneeId} onChange={assign} />
+        <Field label="Owners" hint={<OwnersHint n={task.assigneeIds.length} />}>
+          <OwnerPicker
+            value={task.assigneeIds}
+            onToggle={toggleOwner}
+            onClear={() => task.assigneeIds.length && set({ removeAssignees: [...task.assigneeIds] }, "Unassigned")}
+          />
         </Field>
 
         <Field label="Status">
@@ -598,7 +607,7 @@ function NewTaskForm({ onDone }: { onDone: () => void }) {
   const [summary, setSummary] = useState("");
   const [description, setDescription] = useState("");
   const [pillar, setPillar] = useState<string | null>(null);
-  const [assigneeId, setAssignee] = useState<string | null>(null);
+  const [assigneeIds, setOwners] = useState<string[]>([]);
   const [status, setStatus] = useState<Status>("todo");
   const [priority, setPriority] = useState<Priority>("medium");
   const [due, setDue] = useState<string | null>(null);
@@ -607,7 +616,7 @@ function NewTaskForm({ onDone }: { onDone: () => void }) {
   const submit = async () => {
     if (!title.trim()) return;
     setBusy(true);
-    const ok = await create({ title, summary, description, pillar, assigneeId, status, priority, due });
+    const ok = await create({ title, summary, description, pillar, assigneeIds, status, priority, due });
     setBusy(false);
     if (ok) {
       notify("Task created");
@@ -649,8 +658,12 @@ function NewTaskForm({ onDone }: { onDone: () => void }) {
             placeholder={"Context: why this matters\nSteps:\n- First step\n- Second step\nDone when: what finished looks like"}
           />
         </Field>
-        <Field label="Owner">
-          <OwnerPicker value={assigneeId} onChange={setAssignee} />
+        <Field label="Owners" hint={<OwnersHint n={assigneeIds.length} />}>
+          <OwnerPicker
+            value={assigneeIds}
+            onToggle={(id, add) => setOwners((v) => (add ? [...v.filter((x) => x !== id), id] : v.filter((x) => x !== id)))}
+            onClear={() => setOwners([])}
+          />
         </Field>
         <Field label="Status">
           <Segmented label="Status" value={status} options={STATUSES} onChange={setStatus} render={StatusOption} />

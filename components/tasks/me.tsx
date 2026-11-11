@@ -32,7 +32,7 @@ const RANK = Object.fromEntries(PRIORITIES.map((p, i) => [p, i]));
 function myTasks(tasks: Task[], id: string) {
   const today = todayISO();
   return tasks
-    .filter((t) => t.assigneeId === id)
+    .filter((t) => t.assigneeIds.includes(id))
     .sort(
       (a, b) =>
         Number(a.status === "done") - Number(b.status === "done") ||
@@ -60,7 +60,7 @@ export function MeWidget() {
   useEffect(() => {
     if (!loaded || !actor || store.get(GREETED_KEY, true)) return;
     store.set(GREETED_KEY, "1", true);
-    const open = tasks.filter((t) => t.assigneeId === actor.id && t.status !== "done").length;
+    const open = tasks.filter((t) => t.assigneeIds.includes(actor.id) && t.status !== "done").length;
     notify(`Welcome back, ${firstName(actor)} · ${open ? `${open} open task${open === 1 ? "" : "s"}` : "nothing open right now"}`);
   }, [loaded, actor, tasks, notify]);
 
@@ -78,8 +78,8 @@ export function MeWidget() {
   }, [panel]);
 
   if (!loaded) return null;
-  const open = actor ? tasks.filter((t) => t.assigneeId === actor.id && t.status !== "done").length : 0;
-  const late = actor ? tasks.filter((t) => t.assigneeId === actor.id && isOverdue(t)).length : 0;
+  const open = actor ? tasks.filter((t) => t.assigneeIds.includes(actor.id) && t.status !== "done").length : 0;
+  const late = actor ? tasks.filter((t) => t.assigneeIds.includes(actor.id) && isOverdue(t)).length : 0;
 
   return (
     <>
@@ -187,7 +187,10 @@ function MyPanel({ me, onClose }: { me: Member; onClose: () => void }) {
                     </span>
                     <span className="min-w-0 flex-1">
                       <span className={`line-clamp-2 text-sm leading-snug ${t.status === "done" ? "text-muted line-through decoration-faint" : ""}`}>{t.title}</span>
-                      <span className="mt-0.5 block truncate text-[11px] text-faint">{t.context}</span>
+                      <span className="mt-0.5 block truncate text-[11px] text-faint">
+                        {t.context}
+                        {t.assignees.length > 1 && ` · with ${t.assigneeIds.flatMap((id, i) => (id === me.id ? [] : [t.assignees[i]])).join(", ")}`}
+                      </span>
                     </span>
                     {t.due && (
                       <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] ${late ? "bg-st-blocked/12 font-medium text-st-blocked" : "bg-panel-2 text-muted"}`}>

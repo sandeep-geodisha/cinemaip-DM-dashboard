@@ -14,9 +14,20 @@ import {
 import { isBoardResponse, planTextById, type ActivityEntry, type BoardResponse, type Member, type Task } from "@/lib/tasks";
 import { TaskEditor } from "@/components/tasks/editor";
 
-export type Patch = Partial<Pick<Task, "assigneeId" | "status" | "priority" | "due" | "notes" | "title" | "summary" | "description">> & {
+export type Patch = Partial<Pick<Task, "assigneeIds" | "status" | "priority" | "due" | "notes" | "title" | "summary" | "description">> & {
   pillar?: string | null;
+  /** Owners to add or take off, leaving the others as they are (safe when several people edit at once). */
+  addAssignees?: string[];
+  removeAssignees?: string[];
 };
+
+/** The owner list a patch produces, mirroring the server. */
+export function ownersAfter(current: string[], patch: Patch): string[] {
+  const base = patch.assigneeIds ?? current;
+  const add = (patch.addAssignees ?? []).filter((id) => !base.includes(id));
+  const drop = new Set(patch.removeAssignees ?? []);
+  return [...base, ...add].filter((id) => !drop.has(id));
+}
 
 type Editing = { mode: "edit"; id: string } | { mode: "new" } | null;
 type ToastAction = { label: string; run: () => void };
@@ -99,7 +110,7 @@ const writeActor = (id: string | null) => {
 
 /**
  * Holds the shared task board. Loads it from /api/tasks, applies edits
- * optimistically, and polls (cheaply, by etag) so changes made by anyone,
+ * optimistically, and polls (lightly, by etag) so changes made by anyone,
  * including hand edits to the JSON file, show up within a few seconds.
  */
 export function TasksProvider({ children }: { children: ReactNode }) {
@@ -153,11 +164,14 @@ export function TasksProvider({ children }: { children: ReactNode }) {
           notify(json.error ?? `Request failed (${res.status})`, "error");
           return null;
         }
-        if (!accept(json)) {
+        if (!isBoardResponse(json)) {
           notify("The board sent something unexpected. Reloading it…", "error");
           etag.current = null;
           return null;
         }
+        // Another change is still on its way; its reply includes this one, so wait for it
+        // rather than briefly showing a board without that change.
+        if (pending.current === 1) accept(json);
         return json;
       } catch {
         notify("Couldn't reach the server. That change wasn't saved.", "error");
@@ -230,8 +244,14 @@ export function TasksProvider({ children }: { children: ReactNode }) {
     async (id: string, patch: Patch) => {
       // Optimistic: show the change now; the server's reply replaces it.
       const plan = planTextById().get(id);
+      const team = data && isBoardResponse(data) ? data.team : [];
       patchLocal(id, (t) => {
-        const next = { ...t, ...patch } as Task;
+        const { addAssignees, removeAssignees, ...fields } = patch;
+        const next = { ...t, ...fields } as Task;
+        if (patch.assigneeIds || addAssignees || removeAssignees) {
+          next.assigneeIds = ownersAfter(t.assigneeIds, patch);
+          next.assignees = next.assigneeIds.map((m) => team.find((x) => x.id === m)?.name ?? "");
+        }
         for (const k of ["title", "summary", "description"] as const)
           if (patch[k] !== undefined && !patch[k]?.trim() && plan) next[k] = plan[k];
         return next;
@@ -240,7 +260,7 @@ export function TasksProvider({ children }: { children: ReactNode }) {
       if (!ok) refresh(true);
       return ok;
     },
-    [call, patchLocal, refresh],
+    [call, patchLocal, refresh, data],
   );
 
   const restore = useCallback(

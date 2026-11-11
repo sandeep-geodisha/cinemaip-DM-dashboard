@@ -399,7 +399,7 @@ export default function Home() {
                     <p className="mt-2 leading-relaxed text-muted">{d.question}</p>
                   </div>
                   <div className="mt-auto flex items-center justify-between gap-2 border-t border-line px-6 py-3.5">
-                    <span className="text-[11px] tracking-wider text-faint uppercase">Owner</span>
+                    <span className="text-[11px] tracking-wider text-faint uppercase">Owners</span>
                     <OwnerChip taskId={decisionTaskId(d.topic)} />
                   </div>
                 </article>

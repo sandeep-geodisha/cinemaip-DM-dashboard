@@ -59,9 +59,6 @@ export function Nav() {
       <nav className="mx-auto flex h-16 max-w-7xl items-center justify-between gap-4 px-4 sm:px-6">
         <a href="#top" className="group flex items-center gap-2.5" aria-label="CinemaIP, back to top">
           <Image src={logo} alt="CinemaIP" priority unoptimized className="h-6 w-auto transition-transform duration-500 group-hover:scale-[1.03] sm:h-7" />
-          <span className="hidden rounded-full border border-line px-2 py-0.5 text-[10px] tracking-[0.18em] text-muted uppercase sm:inline">
-            Marketing plan
-          </span>
         </a>
         <ul className="hidden items-center gap-1 lg:flex">
           {LINKS.map((l) => (
