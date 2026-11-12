@@ -24,6 +24,8 @@ export type Goal = { goal: string; target: number; label: string; detail: string
 
 export type PlanActivity = {
   initiativeId: number;
+  /** Only needed when an initiative has two activities in the same act; becomes part of the task id. */
+  key?: string;
   /** Task title. */
   activity: string;
   /** One line shown on the task card. */
@@ -162,6 +164,23 @@ export const phases: Phase[] = [
       measure: "Link clicks and sign-ups per 100 comments, per platform.",
       watch: "Fully automatic link comments on other pages break Meta and X rules.",
       needs: ["Bots", "Team time"] }),
+    act({ initiativeId: 2, key: "x-posts", activity: "Auto-post daily box office updates to CinemaIP's X account",
+      summary: "Turn CinemaIP's own box office data into scheduled X posts that link back to each movie page.",
+      steps: [
+        "Connect CinemaIP's X account through the official X API and check which API plan covers our posting volume.",
+        "Pull each current release's figures from CinemaIP's data: Day 1, opening weekend, running total and day-wise change.",
+        "Write post templates: Day 1 collection, opening weekend, milestones crossed (for example ₹100 Cr) and a weekly top 5 chart.",
+        "Add an auto-made box office card image to each post, with the source and date on it.",
+        "Put a tracked link to the movie page in every post.",
+        "Schedule a morning update for current releases, plus milestone posts as soon as the data shows them.",
+        "Send posts to a review queue for the first two weeks; after that, post automatically with a daily spot-check.",
+        "Skip a post automatically if a film's figures haven't updated or failed verification.",
+      ],
+      doneWhen: "Posts go out on schedule every day for current releases, each with the source, date and a tracked link, and nothing posts from stale data.",
+      measure: "Link clicks and sign-ups from X posts, followers gained, and impressions per post.",
+      budget: "From the ₹10K Bots and agents line, shared with the reply bots. Start on the free X API plan; a paid plan would need a budget decision.",
+      watch: "Post only verified, dated figures, since a wrong number spreads fast. Follow X's automation rules: no duplicate posts, and no automated replies or mentions to people who didn't ask.",
+      needs: ["Team time"] }),
     act({ initiativeId: 9, activity: "Onboard the first 25 paid critics",
       summary: "Bring in the first 25 paid critics, with a guide, a review template and moderation in place.",
       steps: [

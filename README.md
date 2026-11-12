@@ -80,7 +80,7 @@ On Redis, saves are compare-and-swap, so people editing at the same moment never
 - **Tidying.** On the next read the app checks it and fixes small problems: it gives new people an id, clears owners who aren't on the team, and adds back any missing plan task. In `assigneeIds` you can type a person's name or email instead of their id; it's swapped for the id. Files from older versions (one `assigneeId` per task) are upgraded automatically after a backup.
 - **Broken JSON.** If the file isn't valid JSON, the page keeps showing the last good version and pauses edits, so your file is never overwritten. Fix the file and it carries on.
 
-**Plan tasks.** The board's plan tasks are the 7 decisions and the 16 calendar activities in `lib/plan.ts`, each with its own steps, "Done when", measure, budget share and the decisions it waits on. Initiatives are budget lines, not tasks: their cards list the calendar tasks that deliver them.
+**Plan tasks.** The board's plan tasks are the 7 decisions and the 17 calendar activities in `lib/plan.ts`, each with its own steps, "Done when", measure, budget share and the decisions it waits on. Initiatives are budget lines, not tasks: their cards list the calendar tasks that deliver them.
 
 **Changing plan wording.** When the wording in `lib/plan.ts` changes, saved tasks still on the old default wording are updated automatically; anything someone edited by hand is kept. Before changing the wording, add the current fingerprints to `lib/plan-legacy.ts` so the upgrade recognises the old text.
 

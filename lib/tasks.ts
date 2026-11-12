@@ -140,7 +140,9 @@ const slug = (s: string) =>
     .replace(/^-|-$/g, "");
 
 export const decisionTaskId = (topic: string) => `decision:${slug(topic)}`;
-export const activityTaskId = (phase: number, initiativeId: number) => `activity:p${phase}-i${initiativeId}`;
+/** `key` tells apart two activities of one initiative in the same act. */
+export const activityTaskId = (phase: number, initiativeId: number, key?: string) =>
+  `activity:p${phase}-i${initiativeId}${key ? `-${key}` : ""}`;
 /** Retired: initiatives are no longer tasks of their own; their calendar activities are. */
 export const retiredInitiativeId = (id: string) => /^initiative:\d+$/.test(id);
 
@@ -250,7 +252,7 @@ export function planCatalogue(): PlanText[] {
       p.activities.map((a) => {
         const ini = byId.get(a.initiativeId)!;
         return {
-          id: activityTaskId(p.phase, a.initiativeId),
+          id: activityTaskId(p.phase, a.initiativeId, a.key),
           type: "activity" as const,
           title: a.activity,
           summary: a.summary,

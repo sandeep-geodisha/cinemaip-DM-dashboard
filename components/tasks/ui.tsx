@@ -399,7 +399,7 @@ export function InitiativeTasks({ initiativeId }: { initiativeId: number }) {
   return (
     <ul className="flex flex-col gap-1.5">
       {activitiesOf(initiativeId).map(({ phase, a }) => {
-        const id = activityTaskId(phase.phase, initiativeId);
+        const id = activityTaskId(phase.phase, initiativeId, a.key);
         const t = byId.get(id);
         const status = t?.status ?? "todo";
         const gone = removedIds.has(id);

@@ -424,7 +424,7 @@ function Acts({ active }: { active: (i: Initiative) => boolean }) {
                       </p>
                       <p className="mt-0.5 text-sm leading-snug">{a.activity}</p>
                     </div>
-                    <OwnerChip taskId={activityTaskId(p.phase, a.initiativeId)} compact />
+                    <OwnerChip taskId={activityTaskId(p.phase, a.initiativeId, a.key)} compact />
                   </div>
                 </li>
               );

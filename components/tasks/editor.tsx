@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useRef, useState, type ReactNode } from "react";
+import { useEffect, useLayoutEffect, useRef, useState, type ReactNode, type TextareaHTMLAttributes } from "react";
 import { PILLARS, pillarColor } from "@/lib/plan";
 import {
   KIND_LABEL,
@@ -207,6 +207,60 @@ function OwnerPicker({ value, onToggle, onClear }: { value: string[]; onToggle: 
   );
 }
 
+/** A one-line title field that wraps onto more lines instead of cutting long titles off. Enter saves. */
+function GrowingTitle({
+  value,
+  onChange,
+  onBlur,
+  onEnter = (el) => el.blur(),
+  className,
+  ...rest
+}: { value: string; onChange: (v: string) => void; onBlur?: () => void; onEnter?: (el: HTMLTextAreaElement) => void; className: string } & Omit<
+  TextareaHTMLAttributes<HTMLTextAreaElement>,
+  "value" | "onChange" | "onBlur" | "className"
+>) {
+  const ref = useRef<HTMLTextAreaElement>(null);
+  // Fit the height to the text. Measured again whenever the width changes,
+  // including when the drawer opens (while it's closed there's nothing to measure).
+  const fit = () => {
+    const el = ref.current;
+    if (!el) return;
+    el.style.height = "auto";
+    if (el.scrollHeight) el.style.height = `${el.scrollHeight}px`;
+  };
+  useLayoutEffect(fit, [value]);
+  useEffect(() => {
+    const el = ref.current;
+    if (!el) return;
+    let width = 0;
+    const ro = new ResizeObserver(([e]) => {
+      if (e.contentRect.width === width) return;
+      width = e.contentRect.width;
+      fit();
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+  return (
+    <textarea
+      ref={ref}
+      rows={1}
+      value={value}
+      onChange={(e) => onChange(e.target.value.replace(/\s*\n\s*/g, " "))}
+      onBlur={onBlur}
+      onKeyDown={(e) => {
+        if (e.key === "Enter") {
+          e.preventDefault();
+          onEnter(e.currentTarget);
+        }
+      }}
+      maxLength={LIMITS.title}
+      className={`block resize-none overflow-hidden ${className}`}
+      {...rest}
+    />
+  );
+}
+
 function OwnersHint({ n }: { n: number }) {
   return <span className="text-xs text-faint">{n ? `${n} owner${n === 1 ? "" : "s"} · tick more to share it` : "Tick one or more people"}</span>;
 }
@@ -379,15 +433,13 @@ function EditTask({ task, onClose }: { task: Task; onClose: () => void }) {
       >
         <label className="group/title relative mt-3 block">
           <span className="sr-only">Title</span>
-          <input
+          <GrowingTitle
             value={title.value}
-            onChange={(e) => title.set(e.target.value)}
+            onChange={title.set}
             onBlur={saveTitle}
-            onKeyDown={(e) => e.key === "Enter" && e.currentTarget.blur()}
-            maxLength={LIMITS.title}
             className="-mx-2 w-[calc(100%+1rem)] rounded-lg bg-transparent px-2 py-1 pr-8 font-display text-2xl leading-snug transition hover:bg-panel focus:bg-panel focus:ring-2 focus:ring-gold/30 focus:outline-none"
           />
-          <span className="pointer-events-none absolute top-1/2 right-0 -translate-y-1/2 text-faint opacity-0 transition group-hover/title:opacity-100">
+          <span className="pointer-events-none absolute top-3 right-0 text-faint opacity-0 transition group-hover/title:opacity-100">
             <PencilIcon />
           </span>
         </label>
@@ -634,12 +686,12 @@ function NewTaskForm({ onDone }: { onDone: () => void }) {
       }}
     >
       <DrawerHeader onClose={onDone} kicker={<span className="rounded-full border border-gold/40 px-2 py-0.5 text-gold-ink">New task</span>}>
-        <input
+        <GrowingTitle
           autoFocus
           required
           value={title}
-          onChange={(e) => setTitle(e.target.value)}
-          maxLength={LIMITS.title}
+          onChange={setTitle}
+          onEnter={(el) => el.form?.requestSubmit()}
           placeholder="What needs to happen?"
           aria-label="Title"
           className="mt-3 w-full bg-transparent font-display text-2xl leading-snug placeholder:text-faint focus:outline-none"
